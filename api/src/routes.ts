@@ -294,6 +294,21 @@ function handleRouteError(res: Response, error: unknown) {
   });
 }
 
+router.get("/", (_req, res) => {
+  res.json({
+    name: "Market Analysis API",
+    status: "ok",
+    health: "/health",
+    endpoints: {
+      quotes: "/api/mt4/quotes",
+      snapshot: "/api/mt4/snapshot",
+      agents: "/api/market/agents",
+      trends: "/api/market/trends",
+      news: "/api/news/global"
+    }
+  });
+});
+
 router.get("/health", (_req, res) => {
   res.json({
     status: "ok",
