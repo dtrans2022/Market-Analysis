@@ -545,9 +545,69 @@ async function fetchYahooTrends(): Promise<MarketTrend[] | null> {
   return trends.length > 0 ? trends : null;
 }
 
+async function fetchFmpTrends(): Promise<MarketTrend[] | null> {
+  if (!config.FMP_API_KEY) {
+    return null;
+  }
+
+  const symbols = [
+    { code: "EURUSD", label: "EUR/USD", name: "Euro vs US Dollar", category: "forex" as const },
+    { code: "GBPUSD", label: "GBP/USD", name: "British Pound vs US Dollar", category: "forex" as const },
+    { code: "USDJPY", label: "USD/JPY", name: "US Dollar vs Japanese Yen", category: "forex" as const },
+    { code: "USDCHF", label: "USD/CHF", name: "US Dollar vs Swiss Franc", category: "forex" as const },
+    { code: "AUDUSD", label: "AUD/USD", name: "Australian Dollar vs US Dollar", category: "forex" as const },
+    { code: "XAUUSD", label: "XAU/USD", name: "Gold Spot", category: "commodity" as const },
+    { code: "XAGUSD", label: "XAG/USD", name: "Silver Spot", category: "commodity" as const },
+    { code: "BRENT", label: "BRENT", name: "Crude Oil Brent", category: "oil" as const },
+    { code: "WTI", label: "WTI", name: "Crude Oil WTI", category: "oil" as const }
+  ];
+
+  try {
+    const url = new URL("https://financialmodelingprep.com/api/v3/quote/" + symbols.map((item) => item.code).join(","));
+    url.searchParams.set("apikey", config.FMP_API_KEY);
+    const response = await fetch(url);
+    if (!response.ok) {
+      return null;
+    }
+
+    const payload = await response.json() as Array<{ symbol?: string; price?: number | string; changesPercentage?: number | string; changePercentage?: number | string; change?: number | string }>;
+    const quoteByCode = new Map(payload.map((item) => [item.symbol, item]));
+    const trends = symbols.map((item) => {
+      const quote = quoteByCode.get(item.code);
+      const price = Number(quote?.price);
+      const changePercent = Number(quote?.changesPercentage ?? quote?.changePercentage ?? quote?.change);
+      if (!Number.isFinite(price) || price <= 0 || !Number.isFinite(changePercent)) {
+        return null;
+      }
+
+      const direction = toDirection(changePercent);
+      return {
+        symbol: item.label,
+        name: item.name,
+        category: item.category,
+        price,
+        changePercent,
+        direction,
+        momentum: direction === "up" ? "Up" : "Down",
+        momentumSuggestion: direction === "up" ? "Up" : "Down",
+        confidence: Math.max(55, Math.min(95, Math.round(Math.abs(changePercent) * 10 + 60)))
+      } satisfies MarketTrend;
+    }).filter((item): item is MarketTrend => item !== null);
+
+    return trends.length > 0 ? trends : null;
+  } catch {
+    return null;
+  }
+}
+
 export async function getMarketTrends(): Promise<MarketTrendsResponse> {
   if (!config.FINNHUB_API_KEY) {
     try {
+      const fmp = await fetchFmpTrends();
+      if (fmp) {
+        return { data: fmp, source: "live", reason: "Using Financial Modeling Prep live quotes" };
+      }
+
       const yahoo = await fetchYahooTrends();
       if (yahoo) {
         return {
@@ -640,6 +700,11 @@ export async function getMarketTrends(): Promise<MarketTrendsResponse> {
   }
 
   try {
+    const fmp = await fetchFmpTrends();
+    if (fmp) {
+      return { data: fmp, source: "live", reason: "Finnhub unavailable; using Financial Modeling Prep live quotes" };
+    }
+
     const yahoo = await fetchYahooTrends();
     if (yahoo) {
       return {
