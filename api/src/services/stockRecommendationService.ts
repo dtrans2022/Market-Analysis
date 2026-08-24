@@ -136,6 +136,65 @@ const universe: UniverseStock[] = [
   { symbol: "ORCL", name: "Oracle Corp", sector: "Technology" }
 ];
 
+const fallbackPrices: Record<string, number> = {
+  MSFT: 431.2,
+  NVDA: 128.6,
+  AAPL: 227.8,
+  AMZN: 231.4,
+  GOOGL: 201.1,
+  META: 752.3,
+  TSLA: 339.5,
+  JPM: 294.6,
+  XOM: 116.74,
+  CVX: 162.2,
+  RIO: 64.3,
+  BHP: 51.8,
+  UNH: 308.4,
+  JNJ: 179.1,
+  PG: 166.7,
+  KO: 70.4,
+  PEP: 145.8,
+  WMT: 99.2,
+  HD: 407.6,
+  MCD: 307.1,
+  ABBV: 198.6,
+  LLY: 755.3,
+  MRK: 81.4,
+  BAC: 47.9,
+  V: 344.8,
+  MA: 590.2,
+  COST: 976.4,
+  NFLX: 1195.6,
+  AMD: 171.4,
+  ORCL: 241.9
+};
+
+function buildFallbackSuggestions() {
+  return universe.map((stock, index) => {
+    const seed = stock.symbol.split("").reduce((sum, character, characterIndex) => sum + character.charCodeAt(0) * (characterIndex + 1), index);
+    const changePercent = Number((((seed % 500) / 100) - 2.5).toFixed(2));
+    const momentum = scoreMomentum(changePercent);
+    const score = Number((momentum * 0.65 + 58 * 0.15 + 55 * 0.1 + 52 * 0.1).toFixed(1));
+
+    return {
+      symbol: stock.symbol,
+      name: stock.name,
+      sector: stock.sector,
+      price: fallbackPrices[stock.symbol] ?? 100,
+      changePercent,
+      score,
+      source: "fallback" as const,
+      factorScores: {
+        momentum: Number(momentum.toFixed(1)),
+        volatility: 58,
+        sentiment: 55,
+        participation: 52
+      },
+      rationale: "Fallback ranked share while live quote providers are unavailable."
+    } satisfies StockSuggestion;
+  });
+}
+
 function rankAndLimit(items: StockSuggestion[], limit = TOP_SHARES_COUNT) {
   return items
     .slice()
@@ -342,9 +401,10 @@ async function getYahooSuggestions(): Promise<StockSuggestion[] | null> {
 }
 
 export async function getBestShares(): Promise<StockSuggestion[]> {
+  const fallbackUniverse = buildFallbackSuggestions();
   if (!config.FINNHUB_API_KEY) {
     const [yahoo, alpha] = await Promise.all([getYahooSuggestions(), getAlphaVantageSuggestions()]);
-    const merged = rankAndLimit(mergeUniqueSuggestions(yahoo ?? [], alpha ?? [], fallbackSuggestions));
+    const merged = rankAndLimit(mergeUniqueSuggestions(yahoo ?? [], alpha ?? [], fallbackUniverse, fallbackSuggestions));
     if (merged.length > 0) {
       return merged;
     }
@@ -356,7 +416,7 @@ export async function getBestShares(): Promise<StockSuggestion[]> {
       );
     }
 
-    return fallbackSuggestions;
+    return rankAndLimit(mergeUniqueSuggestions(fallbackUniverse, fallbackSuggestions));
   }
 
   try {
@@ -444,7 +504,7 @@ export async function getBestShares(): Promise<StockSuggestion[]> {
     const validCandidates = candidates.filter((item): item is NonNullable<typeof item> => item !== null);
 
     const [yahoo, alpha] = await Promise.all([getYahooSuggestions(), getAlphaVantageSuggestions()]);
-    const ranked = rankAndLimit(mergeUniqueSuggestions(validCandidates, yahoo ?? [], alpha ?? [], fallbackSuggestions));
+    const ranked = rankAndLimit(mergeUniqueSuggestions(validCandidates, yahoo ?? [], alpha ?? [], fallbackUniverse, fallbackSuggestions));
 
     if (ranked.length > 0) {
       return ranked;
@@ -454,10 +514,10 @@ export async function getBestShares(): Promise<StockSuggestion[]> {
       throwLiveDataUnavailable("Live best shares unavailable", "Live providers are unavailable");
     }
 
-    return fallbackSuggestions;
+    return rankAndLimit(mergeUniqueSuggestions(fallbackUniverse, fallbackSuggestions));
   } catch {
     const [yahoo, alpha] = await Promise.all([getYahooSuggestions(), getAlphaVantageSuggestions()]);
-    const merged = rankAndLimit(mergeUniqueSuggestions(yahoo ?? [], alpha ?? [], fallbackSuggestions));
+    const merged = rankAndLimit(mergeUniqueSuggestions(yahoo ?? [], alpha ?? [], fallbackUniverse, fallbackSuggestions));
     if (merged.length > 0) {
       return merged;
     }
@@ -466,6 +526,6 @@ export async function getBestShares(): Promise<StockSuggestion[]> {
       throwLiveDataUnavailable("Live best shares unavailable", "Live providers are unavailable");
     }
 
-    return fallbackSuggestions;
+    return rankAndLimit(mergeUniqueSuggestions(fallbackUniverse, fallbackSuggestions));
   }
 }
