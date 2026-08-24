@@ -412,10 +412,12 @@ async function getFmpSuggestions(): Promise<StockSuggestion[] | null> {
     ];
     let payload: Array<{
       symbol?: string;
+      ticker?: string;
       name?: string;
-      price?: number;
-      changesPercentage?: number;
-      change?: number;
+      price?: number | string;
+      changesPercentage?: number | string;
+      changePercentage?: number | string;
+      change?: number | string;
     }> = [];
 
     for (const endpoint of endpoints) {
@@ -434,10 +436,15 @@ async function getFmpSuggestions(): Promise<StockSuggestion[] | null> {
     }
 
     const suggestions = payload
-      .filter((item) => typeof item.symbol === "string" && Number.isFinite(Number(item.price)) && Number.isFinite(Number(item.changesPercentage)))
+      .map((item) => ({
+        ...item,
+        symbol: item.symbol || item.ticker,
+        changePercent: Number(item.changesPercentage ?? item.changePercentage ?? item.change)
+      }))
+      .filter((item) => typeof item.symbol === "string" && Number.isFinite(Number(item.price)) && Number.isFinite(item.changePercent))
       .slice(0, TOP_SHARES_COUNT)
       .map((item) => {
-        const changePercent = Number(item.changesPercentage);
+        const changePercent = item.changePercent;
         const momentum = scoreMomentum(changePercent);
         return {
           symbol: item.symbol!,
