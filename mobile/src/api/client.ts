@@ -721,10 +721,9 @@ export async function fetchMarketHistory(symbols: string[], timeframes: MarketHi
 
 export async function fetchMarketAgents() {
   try {
-    return await getJson<MarketAgentsResponse>("/api/market/agents?validation=v1", {
+    return await getJson<MarketAgentsResponse>("/api/market/agents?validation=v2", {
       timeoutMs: 90_000,
-      bypassTabLeader: true,
-      allowCache: false
+      allowCache: true
     });
   } catch (error) {
     throw new Error(error instanceof Error ? error.message : "Failed to load market agents");

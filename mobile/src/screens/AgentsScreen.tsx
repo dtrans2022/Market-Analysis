@@ -819,11 +819,11 @@ function ForexValidationPanel({ items }: { items: ForexValidationItem[] }) {
 }
 
 export function AgentsScreen() {
-  const { data, loading, error } = usePollingData(fetchMarketAgents, REFRESH_INTERVAL_MS, undefined, {
-    keepPreviousDataOnError: false
+  const { data, loading, error } = usePollingData(fetchMarketAgents, 5 * 60_000, "market-agents", {
+    keepPreviousDataOnError: true
   });
   const mt4QuotesFeed = usePollingData(fetchMt4Quotes, MT4_QUOTES_REFRESH_MS, "mt4-quotes");
-  const monitoringReportFeed = usePollingData(fetchForexMonitoringReport, REFRESH_INTERVAL_MS, "forex-monitoring-report");
+  const monitoringReportFeed = usePollingData(fetchForexMonitoringReport, 5 * 60_000, "forex-monitoring-report");
   const { width } = useWindowDimensions();
   const [expandedSymbols, setExpandedSymbols] = useState<Record<string, boolean>>({});
   const [selectedAnalysisKey, setSelectedAnalysisKey] = useState<string | null>(null);
