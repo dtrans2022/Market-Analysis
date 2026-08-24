@@ -400,11 +400,55 @@ async function getYahooSuggestions(): Promise<StockSuggestion[] | null> {
   }
 }
 
+async function getFmpSuggestions(): Promise<StockSuggestion[] | null> {
+  if (!config.FMP_API_KEY) {
+    return null;
+  }
+
+  try {
+    const url = new URL("https://financialmodelingprep.com/api/v3/stock_market/gainers");
+    url.searchParams.set("apikey", config.FMP_API_KEY);
+    const response = await fetch(url);
+    if (!response.ok) {
+      return null;
+    }
+
+    const payload = await response.json() as Array<{
+      symbol?: string;
+      name?: string;
+      price?: number;
+      changesPercentage?: number;
+      change?: number;
+    }>;
+    const suggestions = payload
+      .filter((item) => typeof item.symbol === "string" && Number.isFinite(Number(item.price)))
+      .slice(0, TOP_SHARES_COUNT)
+      .map((item) => {
+        const changePercent = Number(item.changesPercentage ?? 0);
+        const momentum = scoreMomentum(changePercent);
+        return {
+          symbol: item.symbol!,
+          name: item.name || item.symbol!,
+          price: Number(item.price),
+          changePercent,
+          source: "live" as const,
+          score: Number((momentum * 0.7 + 58 * 0.15 + 55 * 0.15).toFixed(1)),
+          factorScores: { momentum, volatility: 58, sentiment: 55, participation: 55 },
+          rationale: "Live market gainer data via Financial Modeling Prep."
+        } satisfies StockSuggestion;
+      });
+
+    return suggestions.length > 0 ? suggestions : null;
+  } catch {
+    return null;
+  }
+}
+
 export async function getBestShares(): Promise<StockSuggestion[]> {
   const fallbackUniverse = buildFallbackSuggestions();
   if (!config.FINNHUB_API_KEY) {
-    const [yahoo, alpha] = await Promise.all([getYahooSuggestions(), getAlphaVantageSuggestions()]);
-    const merged = rankAndLimit(mergeUniqueSuggestions(yahoo ?? [], alpha ?? [], fallbackUniverse, fallbackSuggestions));
+    const [yahoo, alpha, fmp] = await Promise.all([getYahooSuggestions(), getAlphaVantageSuggestions(), getFmpSuggestions()]);
+    const merged = rankAndLimit(mergeUniqueSuggestions(yahoo ?? [], alpha ?? [], fmp ?? [], fallbackUniverse, fallbackSuggestions));
     if (merged.length > 0) {
       return merged;
     }
@@ -503,8 +547,8 @@ export async function getBestShares(): Promise<StockSuggestion[]> {
 
     const validCandidates = candidates.filter((item): item is NonNullable<typeof item> => item !== null);
 
-    const [yahoo, alpha] = await Promise.all([getYahooSuggestions(), getAlphaVantageSuggestions()]);
-    const ranked = rankAndLimit(mergeUniqueSuggestions(validCandidates, yahoo ?? [], alpha ?? [], fallbackUniverse, fallbackSuggestions));
+    const [yahoo, alpha, fmp] = await Promise.all([getYahooSuggestions(), getAlphaVantageSuggestions(), getFmpSuggestions()]);
+    const ranked = rankAndLimit(mergeUniqueSuggestions(validCandidates, yahoo ?? [], alpha ?? [], fmp ?? [], fallbackUniverse, fallbackSuggestions));
 
     if (ranked.length > 0) {
       return ranked;
@@ -516,8 +560,8 @@ export async function getBestShares(): Promise<StockSuggestion[]> {
 
     return rankAndLimit(mergeUniqueSuggestions(fallbackUniverse, fallbackSuggestions));
   } catch {
-    const [yahoo, alpha] = await Promise.all([getYahooSuggestions(), getAlphaVantageSuggestions()]);
-    const merged = rankAndLimit(mergeUniqueSuggestions(yahoo ?? [], alpha ?? [], fallbackUniverse, fallbackSuggestions));
+    const [yahoo, alpha, fmp] = await Promise.all([getYahooSuggestions(), getAlphaVantageSuggestions(), getFmpSuggestions()]);
+    const merged = rankAndLimit(mergeUniqueSuggestions(yahoo ?? [], alpha ?? [], fmp ?? [], fallbackUniverse, fallbackSuggestions));
     if (merged.length > 0) {
       return merged;
     }

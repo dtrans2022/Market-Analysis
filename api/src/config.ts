@@ -8,6 +8,7 @@ const schema = z.object({
   MARKETAUX_API_KEY: z.string().optional(),
   FINNHUB_API_KEY: z.string().optional(),
   ALPHA_VANTAGE_API_KEY: z.string().optional(),
+  FMP_API_KEY: z.string().optional(),
   SLACK_WEBHOOK_URL: z.string().url().optional(),
   SLACK_WEBHOOK_URLS: z.string().optional(),
   SLACK_NOTIFY_USER_IDS: z.string().optional(),
