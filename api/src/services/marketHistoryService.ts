@@ -1,7 +1,7 @@
 import { getForexCandles, type ForexTimeframe, type OhlcCandle } from "./marketService.js";
 
 export type MarketAssetCategory = "forex" | "commodity" | "oil";
-export type HistoryTimeframe = "1hour" | "4hour" | "12hour" | "1Day" | "1Week";
+export type HistoryTimeframe = "15minute" | "30minute" | "1hour" | "4hour" | "12hour" | "1Day" | "1Week";
 export type HistorySource = "live" | "derived" | "fallback";
 export type PatternKind = "trend" | "range" | "breakout" | "reversal" | "momentum" | "compression";
 export type PatternDirection = "up" | "down" | "neutral";
@@ -49,6 +49,8 @@ export type HistorySeriesFrame = {
   candles: OhlcCandle[];
   source: HistorySource;
   note?: string;
+  coverageDays: number;
+  hasRequestedCoverage: boolean;
 };
 
 export type MarketPatternSignal = {
@@ -81,10 +83,35 @@ export type MarketPatternSignal = {
 export type MarketHistoryResponse = {
   data: Record<string, Record<HistoryTimeframe, HistorySeriesFrame>>;
   patterns: MarketPatternSignal[];
+  candlestickOutcomes: Record<string, Partial<Record<HistoryTimeframe, CandlestickOutcomeSummary[]>>>;
   source: HistorySource | "mixed";
   reason?: string;
   years: number;
   timeframes: HistoryTimeframe[];
+};
+
+export type CandlestickOutcomeSummary = {
+  pattern: CandlestickPattern;
+  formations: number;
+  expectedDirectionCount: number;
+  oppositeDirectionCount: number;
+  neutralOutcomeCount: number;
+  successRate: number | null;
+  atSupportCount: number;
+  atResistanceCount: number;
+  details: CandlestickOutcomeDetail[];
+};
+
+export type CandlestickOutcomeDetail = {
+  timestamp: number;
+  expectedDirection: PatternDirection;
+  outcome: "successful" | "unsuccessful" | "neutral";
+  formedAt: "support" | "resistance" | "support-and-resistance";
+  entryClose: number;
+  followThroughClose: number;
+  volume: number | null;
+  volumeRatio: number | null;
+  note: string;
 };
 
 type HistorySymbol = {
@@ -95,7 +122,7 @@ type HistorySymbol = {
   forexPair?: string;
 };
 
-const SUPPORTED_TIMEFRAMES: HistoryTimeframe[] = ["1hour", "4hour", "12hour", "1Day", "1Week"];
+const SUPPORTED_TIMEFRAMES: HistoryTimeframe[] = ["15minute", "30minute", "1hour", "4hour", "12hour", "1Day", "1Week"];
 
 const HISTORY_SYMBOLS: HistorySymbol[] = [
   { symbol: "AUD/USD", name: "Australian Dollar vs US Dollar", category: "forex", yahooCode: "AUDUSD=X", forexPair: "AUD/USD" },
@@ -181,8 +208,26 @@ function compressCandles(candles: OhlcCandle[], targetCount: number) {
   return output;
 }
 
+function historyCoverage(candles: OhlcCandle[], requestedYears: number) {
+  if (candles.length < 2) {
+    return { coverageDays: 0, hasRequestedCoverage: false };
+  }
+
+  const timestamps = candles.map((candle) => candle.t);
+  const timestampSpan = Math.max(...timestamps) - Math.min(...timestamps);
+  const coverageDays = Math.max(0, Math.floor(timestampSpan / (Math.max(...timestamps) > 1_000_000_000_000 ? 86_400_000 : 86_400)));
+  return {
+    coverageDays,
+    hasRequestedCoverage: coverageDays >= Math.floor(requestedYears * 365 * 0.95)
+  };
+}
+
 function timeframeToTargetCount(timeframe: HistoryTimeframe) {
   switch (timeframe) {
+    case "15minute":
+      return 360;
+    case "30minute":
+      return 360;
     case "1hour":
       return 280;
     case "4hour":
@@ -200,6 +245,10 @@ function timeframeToTargetCount(timeframe: HistoryTimeframe) {
 
 function timeframeLabel(timeframe: HistoryTimeframe) {
   switch (timeframe) {
+    case "15minute":
+      return "15 minute";
+    case "30minute":
+      return "30 minute";
     case "1hour":
       return "1 hour";
     case "4hour":
@@ -372,7 +421,7 @@ function candleStats(candle: OhlcCandle) {
     marubozuBullish: candle.c > candle.o && body / range >= 0.85 && upperWick / range <= 0.08 && lowerWick / range <= 0.08,
     marubozuBearish: candle.o > candle.c && body / range >= 0.85 && upperWick / range <= 0.08 && lowerWick / range <= 0.08,
     doji: body / range <= 0.12,
-    spinningTop: body / range <= 0.3 && upperWick / range >= 0.25 && lowerWick / range >= 0.25
+    spinningTop: body / range > 0.12 && body / range <= 0.3 && upperWick / range >= 0.25 && lowerWick / range >= 0.25
   };
 }
 
@@ -590,22 +639,6 @@ export function detectCandlestickPattern(candles: OhlcCandle[], slope: number, c
     );
   }
 
-  if (candles.length >= 30) {
-    const recent = candles.slice(-30);
-    const closes = recent.map((item) => item.c);
-    const left = closes.slice(0, 10);
-    const middle = closes.slice(10, 22);
-    const right = closes.slice(22, 27);
-    const handle = closes.slice(27);
-    const leftPeak = highest(left);
-    const midLow = lowest(middle);
-    const rightPeak = highest(right);
-    const handleLow = lowest(handle);
-    const cup = midLow < leftPeak * 0.98 && closeTo(leftPeak, rightPeak, 0.7);
-    const validHandle = handleLow >= rightPeak * 0.97;
-    push({ pattern: "cup-and-handle", bias: "up", strength: 4, note: "Cup and handle continuation structure detected." }, cup && validHandle);
-  }
-
   if (candidates.length === 0) {
     return {
       pattern: "none",
@@ -622,6 +655,95 @@ export function detectCandlestickPattern(candles: OhlcCandle[], slope: number, c
   });
 
   return candidates[0];
+}
+
+const CANDLESTICK_PATTERNS: CandlestickPattern[] = [
+  "doji", "dragonfly-doji", "gravestone-doji", "hammer", "inverted-hammer", "hanging-man",
+  "bullish-spinning-top", "bearish-spinning-top", "bullish-marubozu", "bullish-kikker", "bearish-kikker",
+  "bullish-engulfing", "bearish-engulfing", "piercing-line", "dark-cloud-cover", "tweezer-bottom",
+  "tweezer-top", "bullish-harami", "bearish-harami", "morning-star", "bullish-abondened-baby",
+  "bearish-abondened-baby", "three-white-soldiers", "three-black-crows", "three-line-strike",
+  "cup-and-handle", "double-top", "double-bottom", "doble-bottom", "wedge", "flag", "rising-window",
+  "falling-window", "three-inside-up", "three-inside-down", "three-outside-up", "three-outside-down"
+];
+
+function summarizeCandlestickOutcomes(candles: OhlcCandle[]): CandlestickOutcomeSummary[] {
+  const outcomes = new Map<CandlestickPattern, CandlestickOutcomeSummary>(
+    CANDLESTICK_PATTERNS.map((pattern) => [pattern, {
+      pattern,
+      formations: 0,
+      expectedDirectionCount: 0,
+      oppositeDirectionCount: 0,
+      neutralOutcomeCount: 0,
+      successRate: null,
+      atSupportCount: 0,
+      atResistanceCount: 0,
+      details: []
+    }])
+  );
+
+  for (let index = 30; index < candles.length - 5; index += 1) {
+    const candle = candles[index];
+    const levels = candles.slice(Math.max(0, index - 50), index);
+    const support = Math.min(...levels.map((item) => item.l));
+    const resistance = Math.max(...levels.map((item) => item.h));
+    const averageRange = levels.reduce((sum, item) => sum + (item.h - item.l), 0) / levels.length;
+    const tolerance = Math.max(averageRange * 1.5, candle.c * 0.0015);
+    const isAtSupport = candle.l <= support + tolerance;
+    const isAtResistance = candle.h >= resistance - tolerance;
+
+    if (!isAtSupport && !isAtResistance) {
+      continue;
+    }
+
+    const slopeBase = candles[Math.max(0, index - 10)].c;
+    const slope = slopeBase > 0 ? ((candle.c - slopeBase) / slopeBase) * 100 : 0;
+    const detection = detectCandlestickPattern(candles.slice(0, index + 1), slope, { isAtSupport, isAtResistance });
+    if (detection.pattern === "none") {
+      continue;
+    }
+
+    const summary = outcomes.get(detection.pattern)!;
+    summary.formations += 1;
+    summary.atSupportCount += Number(isAtSupport);
+    summary.atResistanceCount += Number(isAtResistance);
+
+    const futureClose = candles[index + 5].c;
+    const outcomeTolerance = Math.max((candle.h - candle.l) * 0.1, candle.c * 0.0001);
+    const outcome = detection.bias === "neutral" || Math.abs(futureClose - candle.c) <= outcomeTolerance
+      ? "neutral"
+      : (detection.bias === "up" && futureClose > candle.c) || (detection.bias === "down" && futureClose < candle.c)
+        ? "successful"
+        : "unsuccessful";
+    if (outcome === "neutral") {
+      summary.neutralOutcomeCount += 1;
+    } else if (outcome === "successful") {
+      summary.expectedDirectionCount += 1;
+    } else {
+      summary.oppositeDirectionCount += 1;
+    }
+    summary.details.push({
+      timestamp: candle.t,
+      expectedDirection: detection.bias,
+      outcome,
+      formedAt: isAtSupport && isAtResistance ? "support-and-resistance" : isAtSupport ? "support" : "resistance",
+      entryClose: candle.c,
+      followThroughClose: futureClose,
+      volume: Number(candle.v) > 0 ? Number(candle.v) : null,
+      volumeRatio: (() => {
+        const priorVolumes = candles.slice(Math.max(0, index - 20), index).map((item) => Number(item.v) || 0).filter((value) => value > 0);
+        if (!Number(candle.v) || priorVolumes.length < 5) return null;
+        return Number((Number(candle.v) / (priorVolumes.reduce((sum, value) => sum + value, 0) / priorVolumes.length)).toFixed(2));
+      })(),
+      note: detection.note
+    });
+  }
+
+  return CANDLESTICK_PATTERNS.map((pattern) => {
+    const summary = outcomes.get(pattern)!;
+    const resolved = summary.expectedDirectionCount + summary.oppositeDirectionCount;
+    return { ...summary, successRate: resolved > 0 ? Math.round((summary.expectedDirectionCount / resolved) * 100) : null };
+  });
 }
 
 function candlestickImpactAtLevels(
@@ -1149,14 +1271,28 @@ function classifyPattern(symbol: HistorySymbol, timeframe: HistoryTimeframe, can
 }
 
 async function fetchForexHistory(pair: string, timeframe: HistoryTimeframe, years: number): Promise<HistorySeriesFrame> {
+  if (timeframe === "15minute" || timeframe === "30minute") {
+    const base = await getForexCandles([pair], "5minute" as ForexTimeframe, years);
+    const source: HistorySource = base.source === "live" ? "live" : "fallback";
+    const bucket = timeframe === "15minute" ? 3 : 6;
+    const raw = base.data[pair] ?? [];
+    return {
+      candles: aggregateCandles(raw, bucket),
+      source,
+      note: source === "live" ? `Live 5-minute forex candles aggregated to ${timeframeLabel(timeframe)} bars` : base.reason ?? "Fallback forex candles",
+      ...historyCoverage(aggregateCandles(raw, bucket), years)
+    };
+  }
+
   if (timeframe === "12hour") {
     const base = await getForexCandles([pair], "1hour" as ForexTimeframe, years);
     const source: HistorySource = base.source === "live" ? "live" : "fallback";
     const raw = base.data[pair] ?? [];
     return {
-      candles: compressCandles(aggregateCandles(raw, 12), timeframeToTargetCount(timeframe)),
+      candles: aggregateCandles(raw, 12),
       source,
-      note: source === "live" ? "Live forex candles aggregated to 12-hour bars" : base.reason ?? "Fallback forex candles"
+      note: source === "live" ? "Live forex candles aggregated to 12-hour bars" : base.reason ?? "Fallback forex candles",
+      ...historyCoverage(aggregateCandles(raw, 12), years)
     };
   }
 
@@ -1165,9 +1301,10 @@ async function fetchForexHistory(pair: string, timeframe: HistoryTimeframe, year
   const raw = base.data[pair] ?? [];
 
   return {
-    candles: compressCandles(raw, timeframeToTargetCount(timeframe)),
+    candles: raw,
     source,
-    note: source === "live" ? `Live forex candles for ${timeframeLabel(timeframe)}` : base.reason ?? "Fallback forex candles"
+    note: source === "live" ? `Live forex candles for ${timeframeLabel(timeframe)}` : base.reason ?? "Fallback forex candles",
+    ...historyCoverage(raw, years)
   };
 }
 
@@ -1178,38 +1315,44 @@ async function fetchCommodityOrOilHistory(symbol: HistorySymbol, timeframe: Hist
     return {
       candles: [],
       source: "fallback",
-      note: `Historical data unavailable for ${symbol.symbol}`
+      note: `Historical data unavailable for ${symbol.symbol}`,
+      coverageDays: 0,
+      hasRequestedCoverage: false
     };
   }
 
   if (timeframe === "1Week") {
     return {
-      candles: compressCandles(aggregateCandles(daily, 5), timeframeToTargetCount(timeframe)),
+      candles: aggregateCandles(daily, 5),
       source: "derived",
-      note: `Derived weekly history from Yahoo daily closes for ${symbol.symbol}`
+      note: `Derived weekly history from Yahoo daily closes for ${symbol.symbol}`,
+      ...historyCoverage(aggregateCandles(daily, 5), 5)
     };
   }
 
   if (timeframe === "12hour") {
     return {
-      candles: compressCandles(aggregateCandles(daily, 2), timeframeToTargetCount(timeframe)),
+      candles: aggregateCandles(daily, 2),
       source: "derived",
-      note: `Derived 12-hour history from Yahoo daily closes for ${symbol.symbol}`
+      note: `Derived 12-hour history from Yahoo daily closes for ${symbol.symbol}`,
+      ...historyCoverage(aggregateCandles(daily, 2), 5)
     };
   }
 
   if (timeframe === "1Day") {
     return {
-      candles: compressCandles(daily, timeframeToTargetCount(timeframe)),
+      candles: daily,
       source: "live",
-      note: `Live Yahoo daily history for ${symbol.symbol}`
+      note: `Live Yahoo daily history for ${symbol.symbol}`,
+      ...historyCoverage(daily, 5)
     };
   }
 
   return {
-    candles: compressCandles(daily, timeframeToTargetCount(timeframe)),
+    candles: daily,
     source: "derived",
-    note: `${symbol.symbol} does not expose public intraday history here; using derived bars from Yahoo daily history`
+    note: `${symbol.symbol} does not expose public intraday history here; using derived bars from Yahoo daily history`,
+    ...historyCoverage(daily, 5)
   };
 }
 
@@ -1221,6 +1364,7 @@ export async function getMarketHistory(symbols: string[], timeframes: HistoryTim
     return {
       data: {},
       patterns: [],
+      candlestickOutcomes: {},
       source: "fallback",
       reason: "No supported market history requested",
       years,
@@ -1230,6 +1374,7 @@ export async function getMarketHistory(symbols: string[], timeframes: HistoryTim
 
   const result: Record<string, Record<HistoryTimeframe, HistorySeriesFrame>> = {};
   const patterns: MarketPatternSignal[] = [];
+  const candlestickOutcomes: Record<string, Partial<Record<HistoryTimeframe, CandlestickOutcomeSummary[]>>> = {};
   const sources = new Set<HistorySource>();
 
   for (const symbolName of requestedSymbols) {
@@ -1239,6 +1384,7 @@ export async function getMarketHistory(symbols: string[], timeframes: HistoryTim
     }
 
     result[symbol.symbol] = {} as Record<HistoryTimeframe, HistorySeriesFrame>;
+    candlestickOutcomes[symbol.symbol] = {};
 
     for (const timeframe of requestedTimeframes) {
       let frame: HistorySeriesFrame;
@@ -1249,10 +1395,17 @@ export async function getMarketHistory(symbols: string[], timeframes: HistoryTim
         frame = await fetchCommodityOrOilHistory(symbol, timeframe);
       }
 
-      result[symbol.symbol][timeframe] = frame;
+      const displayFrame: HistorySeriesFrame = {
+        ...frame,
+        candles: compressCandles(frame.candles, timeframeToTargetCount(timeframe))
+      };
+      result[symbol.symbol][timeframe] = displayFrame;
       sources.add(frame.source);
 
-      patterns.push(classifyPattern(symbol, timeframe, frame.candles, frame.source));
+      patterns.push(classifyPattern(symbol, timeframe, displayFrame.candles, frame.source));
+      candlestickOutcomes[symbol.symbol][timeframe] = frame.hasRequestedCoverage
+        ? summarizeCandlestickOutcomes(frame.candles)
+        : [];
     }
   }
 
@@ -1269,6 +1422,7 @@ export async function getMarketHistory(symbols: string[], timeframes: HistoryTim
   return {
     data: result,
     patterns,
+    candlestickOutcomes,
     source,
     reason,
     years,

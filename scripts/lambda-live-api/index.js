@@ -9,6 +9,8 @@ const MT4_SNAPSHOT_API_KEY = process.env.MT4_SNAPSHOT_API_KEY || "";
 const MT4_SNAPSHOT_TABLE = process.env.MT4_SNAPSHOT_TABLE || "";
 const MT4_SNAPSHOT_PK_NAME = process.env.MT4_SNAPSHOT_PK_NAME || "snapshotKey";
 const MT4_SNAPSHOT_KEY = process.env.MT4_SNAPSHOT_KEY || "latest";
+const DAILY_HISTORY_CACHE_PREFIX = "daily-history#";
+const DAILY_HISTORY_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 let dynamoClient = null;
 let DynamoGetCommand = null;
 let DynamoPutCommand = null;
@@ -58,7 +60,7 @@ const HISTORY_SYMBOLS = {
   WTI: { symbol: "WTI", name: "Crude Oil WTI", category: "oil", yahooCode: "CL=F" }
 };
 
-const HISTORY_TIMEFRAMES = ["1hour", "4hour", "12hour", "1Day", "1Week"];
+const HISTORY_TIMEFRAMES = ["15minute", "30minute", "1hour", "4hour", "12hour", "1Day", "1Week"];
 const DEFAULT_REFERENCE_PRICES = {
   "AUD/USD": 0.66,
   "EUR/USD": 1.09,
@@ -144,6 +146,20 @@ function compressCandles(candles, targetCount) {
   }
 
   return output;
+}
+
+function historyCoverage(candles, requestedYears) {
+  if (candles.length < 2) {
+    return { coverageDays: 0, hasRequestedCoverage: false };
+  }
+
+  const timestamps = candles.map((candle) => candle.t);
+  const timestampSpan = Math.max(...timestamps) - Math.min(...timestamps);
+  const coverageDays = Math.max(0, Math.floor(timestampSpan / (Math.max(...timestamps) > 1_000_000_000_000 ? 86_400_000 : 86_400)));
+  return {
+    coverageDays,
+    hasRequestedCoverage: coverageDays >= Math.floor(requestedYears * 365 * 0.95)
+  };
 }
 
 function timeframeToTargetCount(timeframe) {
@@ -241,6 +257,59 @@ async function fetchYahooHistory(symbol, interval = "1d", range = "5y") {
   });
 }
 
+function isValidDailyHistoryCache(record) {
+  return Array.isArray(record?.candles)
+    && record.candles.length >= 200
+    && record.candles.every((candle) => candle && Number.isFinite(candle.t) && Number.isFinite(candle.o) && Number.isFinite(candle.h) && Number.isFinite(candle.l) && Number.isFinite(candle.c));
+}
+
+async function fetchCachedDailyHistory(symbol) {
+  const cacheKey = `${DAILY_HISTORY_CACHE_PREFIX}${symbol}`;
+  let cached = null;
+
+  if (dynamoClient && DynamoGetCommand && MT4_SNAPSHOT_TABLE) {
+    try {
+      const record = await dynamoClient.send(new DynamoGetCommand({
+        TableName: MT4_SNAPSHOT_TABLE,
+        Key: { [MT4_SNAPSHOT_PK_NAME]: cacheKey }
+      }));
+      cached = record?.Item;
+      const cachedAt = Date.parse(String(cached?.cachedAt || ""));
+      if (isValidDailyHistoryCache(cached) && Number.isFinite(cachedAt) && Date.now() - cachedAt < DAILY_HISTORY_CACHE_TTL_MS) {
+        return { candles: cached.candles, source: "cache" };
+      }
+    } catch {
+      // Fall through to the live provider or a stale persisted snapshot.
+    }
+  }
+
+  const liveCandles = await fetchYahooHistory(symbol, "1d", "5y");
+  if (liveCandles.length >= 200) {
+    if (dynamoClient && DynamoPutCommand && MT4_SNAPSHOT_TABLE) {
+      try {
+        await dynamoClient.send(new DynamoPutCommand({
+          TableName: MT4_SNAPSHOT_TABLE,
+          Item: {
+            [MT4_SNAPSHOT_PK_NAME]: cacheKey,
+            cachedAt: new Date().toISOString(),
+            source: "yahoo",
+            candles: liveCandles
+          }
+        }));
+      } catch {
+        // A successful live response remains usable even if persistence fails.
+      }
+    }
+    return { candles: liveCandles, source: "live" };
+  }
+
+  if (isValidDailyHistoryCache(cached)) {
+    return { candles: cached.candles, source: "stale-cache" };
+  }
+
+  return { candles: [], source: "unavailable" };
+}
+
 async function fetchYahooForexSpotPrice(symbol) {
   const response = await fetch(`https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?interval=1m&range=1d`, {
     headers: {
@@ -269,6 +338,49 @@ async function fetchYahooForexSpotPrice(symbol) {
   }
 
   return null;
+}
+
+async function getLiveForexQuoteFeed(pairs) {
+  const timestamp = new Date().toISOString();
+  const yahooPrices = await Promise.all(pairs.map(async (pair) => [pair, await fetchYahooForexSpotPrice(HISTORY_SYMBOLS[pair].yahooCode)]));
+  const missingPairs = yahooPrices.filter(([, price]) => price == null).map(([pair]) => pair);
+  const fallbackPrices = new Map();
+
+  await Promise.all(Array.from(new Set(missingPairs.map((pair) => pair.split("/")[0]))).map(async (base) => {
+    try {
+      const response = await fetch(`https://open.er-api.com/v6/latest/${encodeURIComponent(base)}`);
+      if (!response.ok) {
+        return;
+      }
+
+      const payload = await response.json();
+      for (const pair of missingPairs.filter((item) => item.startsWith(`${base}/`))) {
+        const quote = pair.split("/")[1];
+        const price = Number(payload?.rates?.[quote]);
+        if (Number.isFinite(price) && price > 0) {
+          fallbackPrices.set(pair, price);
+        }
+      }
+    } catch {
+      // Continue with providers that responded successfully.
+    }
+  }));
+
+  const quotes = yahooPrices.map(([symbol, yahooPrice]) => {
+    const price = yahooPrice ?? fallbackPrices.get(symbol);
+    if (!Number.isFinite(price) || price <= 0) {
+      return null;
+    }
+
+    const spread = price * 0.00015;
+    return { symbol, bid: price - spread / 2, ask: price + spread / 2, spread, timestamp };
+  }).filter(Boolean);
+
+  return {
+    quotes,
+    provider: yahooPrices.some(([, price]) => price != null) ? "Yahoo Finance + ExchangeRate-API" : "ExchangeRate-API",
+    timestamp
+  };
 }
 
 const FINNHUB_FOREX_SYMBOLS = {
@@ -401,7 +513,7 @@ function candleStats(candle) {
     marubozuBullish: candle.c > candle.o && body / range >= 0.85 && upperWick / range <= 0.08 && lowerWick / range <= 0.08,
     marubozuBearish: candle.o > candle.c && body / range >= 0.85 && upperWick / range <= 0.08 && lowerWick / range <= 0.08,
     doji: body / range <= 0.12,
-    spinningTop: body / range <= 0.3 && upperWick / range >= 0.25 && lowerWick / range >= 0.25
+    spinningTop: body / range > 0.12 && body / range <= 0.3 && upperWick / range >= 0.25 && lowerWick / range >= 0.25
   };
 }
 
@@ -512,7 +624,17 @@ function detectCandlestickPattern(candles, slope, context) {
 
   if (s2 && s3) {
     const morningStar = s3.bearish && s2.bodyPct <= 0.25 && s1.bullish && latest.c > s3.mid;
-    const threeWhiteSoldiers = s3.bullish && s2.bullish && s1.bullish && latest.c > previous.c && previous.c > third.c;
+    const threeWhiteSoldiers = s3.bullish
+      && s2.bullish
+      && s1.bullish
+      && s3.bodyPct >= 0.5
+      && s2.bodyPct >= 0.5
+      && s1.bodyPct >= 0.5
+      && latest.c > previous.c
+      && previous.c > third.c
+      && latest.c > latest.o
+      && previous.c > previous.o
+      && third.c > third.o;
     const threeBlackCrows = s3.bearish
       && s2.bearish
       && s1.bearish
@@ -609,22 +731,6 @@ function detectCandlestickPattern(candles, slope, context) {
     );
   }
 
-  if (candles.length >= 30) {
-    const recent = candles.slice(-30);
-    const closes = recent.map((item) => item.c);
-    const left = closes.slice(0, 10);
-    const middle = closes.slice(10, 22);
-    const right = closes.slice(22, 27);
-    const handle = closes.slice(27);
-    const leftPeak = highest(left);
-    const midLow = lowest(middle);
-    const rightPeak = highest(right);
-    const handleLow = lowest(handle);
-    const cup = midLow < leftPeak * 0.98 && closeTo(leftPeak, rightPeak, 0.7);
-    const validHandle = handleLow >= rightPeak * 0.97;
-    push({ pattern: "cup-and-handle", bias: "up", strength: 4, note: "Cup and handle continuation structure detected." }, cup && validHandle);
-  }
-
   if (candidates.length === 0) {
     return {
       pattern: "none",
@@ -641,6 +747,77 @@ function detectCandlestickPattern(candles, slope, context) {
   });
 
   return candidates[0];
+}
+
+const CANDLESTICK_PATTERNS = [
+  "doji", "dragonfly-doji", "gravestone-doji", "hammer", "inverted-hammer", "hanging-man",
+  "bullish-spinning-top", "bearish-spinning-top", "bullish-marubozu", "bullish-kikker", "bearish-kikker",
+  "bullish-engulfing", "bearish-engulfing", "piercing-line", "dark-cloud-cover", "tweezer-bottom",
+  "tweezer-top", "bullish-harami", "bearish-harami", "morning-star", "bullish-abondened-baby",
+  "bearish-abondened-baby", "three-white-soldiers", "three-black-crows", "three-line-strike",
+  "cup-and-handle", "double-top", "double-bottom", "doble-bottom", "wedge", "flag", "rising-window",
+  "falling-window", "three-inside-up", "three-inside-down", "three-outside-up", "three-outside-down"
+];
+
+function summarizeCandlestickOutcomes(candles) {
+  const outcomes = new Map(CANDLESTICK_PATTERNS.map((pattern) => [pattern, {
+    pattern,
+    formations: 0,
+    expectedDirectionCount: 0,
+    oppositeDirectionCount: 0,
+    neutralOutcomeCount: 0,
+    successRate: null,
+    atSupportCount: 0,
+    atResistanceCount: 0,
+    details: []
+  }]));
+
+  for (let index = 30; index < candles.length - 5; index += 1) {
+    const candle = candles[index];
+    const levels = candles.slice(Math.max(0, index - 50), index);
+    const support = Math.min(...levels.map((item) => item.l));
+    const resistance = Math.max(...levels.map((item) => item.h));
+    const averageRange = levels.reduce((sum, item) => sum + (item.h - item.l), 0) / levels.length;
+    const tolerance = Math.max(averageRange * 1.5, candle.c * 0.0015);
+    const isAtSupport = candle.l <= support + tolerance;
+    const isAtResistance = candle.h >= resistance - tolerance;
+    if (!isAtSupport && !isAtResistance) continue;
+
+    const slopeBase = candles[Math.max(0, index - 10)].c;
+    const slope = slopeBase > 0 ? ((candle.c - slopeBase) / slopeBase) * 100 : 0;
+    const detection = detectCandlestickPattern(candles.slice(0, index + 1), slope, { isAtSupport, isAtResistance });
+    if (detection.pattern === "none") continue;
+
+    const summary = outcomes.get(detection.pattern);
+    summary.formations += 1;
+    summary.atSupportCount += Number(isAtSupport);
+    summary.atResistanceCount += Number(isAtResistance);
+
+    const futureClose = candles[index + 5].c;
+    const outcomeTolerance = Math.max((candle.h - candle.l) * 0.1, candle.c * 0.0001);
+    const outcome = detection.bias === "neutral" || Math.abs(futureClose - candle.c) <= outcomeTolerance
+      ? "neutral"
+      : (detection.bias === "up" && futureClose > candle.c) || (detection.bias === "down" && futureClose < candle.c)
+        ? "successful"
+        : "unsuccessful";
+    if (outcome === "neutral") {
+      summary.neutralOutcomeCount += 1;
+    } else if (outcome === "successful") {
+      summary.expectedDirectionCount += 1;
+    } else {
+      summary.oppositeDirectionCount += 1;
+    }
+    const priorVolumes = candles.slice(Math.max(0, index - 20), index).map((item) => Number(item.v) || 0).filter((value) => value > 0);
+    const volume = Number(candle.v) > 0 ? Number(candle.v) : null;
+    const volumeRatio = volume && priorVolumes.length >= 5 ? Number((volume / (priorVolumes.reduce((sum, value) => sum + value, 0) / priorVolumes.length)).toFixed(2)) : null;
+    summary.details.push({ timestamp: candle.t, expectedDirection: detection.bias, outcome, formedAt: isAtSupport && isAtResistance ? "support-and-resistance" : isAtSupport ? "support" : "resistance", entryClose: candle.c, followThroughClose: futureClose, volume, volumeRatio, note: detection.note });
+  }
+
+  return CANDLESTICK_PATTERNS.map((pattern) => {
+    const summary = outcomes.get(pattern);
+    const resolved = summary.expectedDirectionCount + summary.oppositeDirectionCount;
+    return { ...summary, successRate: resolved > 0 ? Math.round((summary.expectedDirectionCount / resolved) * 100) : null };
+  });
 }
 
 function candlestickImpactAtLevels(detection, baseDirection, isAtSupport, isAtResistance) {
@@ -1068,6 +1245,7 @@ async function getLiveHistory(symbols, timeframes, years = 5) {
     return {
       data: {},
       patterns: [],
+      candlestickOutcomes: {},
       source: "fallback",
       reason: "No supported market history requested",
       years,
@@ -1078,6 +1256,7 @@ async function getLiveHistory(symbols, timeframes, years = 5) {
   const referencePrices = await getReferencePriceMap();
   const data = {};
   const patterns = [];
+  const candlestickOutcomes = {};
   const sources = new Set();
 
   const historiesBySymbol = new Map(
@@ -1085,9 +1264,13 @@ async function getLiveHistory(symbols, timeframes, years = 5) {
       const meta = HISTORY_SYMBOLS[symbol];
       const brokerHistory = latestMt4History.get(normalizeForexSymbolKey(symbol)) || latestMt4Snapshot?.history?.[normalizeForexSymbolKey(symbol)] || {};
       const liveSpotPrice = meta.category === "forex" ? await fetchYahooForexSpotPrice(meta.yahooCode) : null;
-      const liveDailyCandles = await fetchYahooHistory(meta.yahooCode, "1d", "5y");
+      const dailyHistory = await fetchCachedDailyHistory(meta.yahooCode);
+      const liveDailyCandles = dailyHistory.candles;
       const finnhubHourlyCandles = meta.category === "forex" && !brokerHistory["1hour"]
-        ? await fetchFinnhubCandles(symbol, "60", Math.floor(Date.now() / 1000) - 365 * 24 * 60 * 60, Math.floor(Date.now() / 1000))
+        ? await fetchFinnhubCandles(symbol, "60", Math.floor(Date.now() / 1000) - years * 365 * 24 * 60 * 60, Math.floor(Date.now() / 1000))
+        : [];
+      const finnhubFiveMinuteCandles = meta.category === "forex" && !brokerHistory["15minute"] && !brokerHistory["30minute"]
+        ? await fetchFinnhubCandles(symbol, "5", Math.floor(Date.now() / 1000) - 60 * 24 * 60 * 60, Math.floor(Date.now() / 1000))
         : [];
       const yahooHourlyCandles = meta.category === "forex"
         ? await fetchYahooHistory(meta.yahooCode, "1h", "730d")
@@ -1095,11 +1278,15 @@ async function getLiveHistory(symbols, timeframes, years = 5) {
       const liveHourlyCandles = brokerHistory["1hour"] || (finnhubHourlyCandles.length > 0 ? finnhubHourlyCandles : yahooHourlyCandles);
 
       const referencePrice = Number(liveSpotPrice || referencePrices.get(meta.symbol) || DEFAULT_REFERENCE_PRICES[meta.symbol] || 0);
-      const baseDailyCandles = brokerHistory["1Day"] || (liveDailyCandles.length > 0
-        ? liveDailyCandles
-        : buildSyntheticDailyHistory(meta, years, referencePrice > 0 ? referencePrice : 1));
+      const brokerDailyCandles = brokerHistory["1Day"] || [];
+      const useBrokerDailyHistory = historyCoverage(brokerDailyCandles, years).hasRequestedCoverage;
+      const baseDailyCandles = useBrokerDailyHistory
+        ? brokerDailyCandles
+        : liveDailyCandles.length > 0
+          ? liveDailyCandles
+          : buildSyntheticDailyHistory(meta, years, referencePrice > 0 ? referencePrice : 1);
 
-      return [symbol, { meta, liveDailyCandles, liveHourlyCandles, baseDailyCandles, brokerHistory, liveSpotPrice }];
+      return [symbol, { meta, dailyHistorySource: dailyHistory.source, liveDailyCandles, liveHourlyCandles, liveFiveMinuteCandles: finnhubFiveMinuteCandles, baseDailyCandles, brokerHistory, liveSpotPrice }];
     }))
   );
 
@@ -1109,22 +1296,34 @@ async function getLiveHistory(symbols, timeframes, years = 5) {
       continue;
     }
 
-    const { meta, liveDailyCandles, liveHourlyCandles, baseDailyCandles, brokerHistory, liveSpotPrice } = symbolHistory;
+    const { meta, dailyHistorySource, liveDailyCandles, liveHourlyCandles, liveFiveMinuteCandles, baseDailyCandles, brokerHistory, liveSpotPrice } = symbolHistory;
     data[symbol] = {};
+    candlestickOutcomes[symbol] = {};
 
     for (const timeframe of uniqueTimeframes) {
       let frameCandles = baseDailyCandles;
-      let source = "live";
-      let note = `Live Yahoo daily history for ${symbol}`;
-      const forexIntraday = meta.category === "forex" && ["1hour", "4hour", "12hour"].includes(timeframe);
+      let source = dailyHistorySource === "live" ? "live" : "derived";
+      let note = dailyHistorySource === "cache"
+        ? `Persisted five-year daily history for ${symbol}; refreshes from Yahoo at most once per day`
+        : dailyHistorySource === "stale-cache"
+          ? `Persisted daily history for ${symbol}; Yahoo refresh was unavailable`
+          : `Live Yahoo daily history for ${symbol}`;
+      const forexIntraday = meta.category === "forex" && ["15minute", "30minute", "1hour", "4hour", "12hour"].includes(timeframe);
+      const sourceCandles = ["15minute", "30minute"].includes(timeframe) ? liveFiveMinuteCandles : liveHourlyCandles;
 
-      if (forexIntraday && liveHourlyCandles.length === 0) {
+      if (forexIntraday && sourceCandles.length === 0) {
         frameCandles = [];
         source = "fallback";
         note = `Live intraday OHLC unavailable for ${symbol}; no ${timeframeLabel(timeframe)} candlestick signal generated`;
-      } else if (brokerHistory[timeframe]) {
+      } else if (brokerHistory[timeframe] && (timeframe !== "1Day" || historyCoverage(brokerHistory[timeframe], years).hasRequestedCoverage)) {
         frameCandles = brokerHistory[timeframe];
         note = `Live MT4 ${timeframeLabel(timeframe)} history for ${symbol}`;
+      } else if (meta.category === "forex" && liveFiveMinuteCandles.length > 0 && timeframe === "15minute") {
+        frameCandles = aggregateCandles(liveFiveMinuteCandles, 3);
+        note = `Derived 15-minute history from live 5-minute candles for ${symbol}`;
+      } else if (meta.category === "forex" && liveFiveMinuteCandles.length > 0 && timeframe === "30minute") {
+        frameCandles = aggregateCandles(liveFiveMinuteCandles, 6);
+        note = `Derived 30-minute history from live 5-minute candles for ${symbol}`;
       } else if (meta.category === "forex" && liveHourlyCandles.length > 0 && timeframe === "1hour") {
         frameCandles = liveHourlyCandles;
         note = `Live Yahoo 1-hour history for ${symbol}`;
@@ -1145,15 +1344,21 @@ async function getLiveHistory(symbols, timeframes, years = 5) {
         note = `${symbol} does not expose live ${timeframeLabel(timeframe)} history here; using derived bars from daily history`;
       }
 
-      frameCandles = compressCandles(frameCandles, timeframeToTargetCount(timeframe));
+      const analysisCandles = frameCandles;
+      const coverage = historyCoverage(analysisCandles, years);
+      frameCandles = compressCandles(analysisCandles, timeframeToTargetCount(timeframe));
 
       data[symbol][timeframe] = {
         candles: frameCandles,
         source,
-        note
+        note,
+        ...coverage
       };
       sources.add(source);
       patterns.push(classifyPattern(meta, timeframe, frameCandles, source));
+      candlestickOutcomes[symbol][timeframe] = coverage.hasRequestedCoverage
+        ? summarizeCandlestickOutcomes(analysisCandles)
+        : [];
     }
   }
 
@@ -1162,6 +1367,7 @@ async function getLiveHistory(symbols, timeframes, years = 5) {
   return {
     data,
     patterns,
+    candlestickOutcomes,
     source,
     reason:
       source === "mixed"
@@ -1217,6 +1423,7 @@ const AGENT_CONFIG = [
 ];
 
 const ANALYSIS_TIMEFRAMES = ["1hour", "4hour", "12hour", "1Day", "1Week"];
+const FOREX_VALIDATION_TIMEFRAMES = ["1hour", "4hour", "12hour", "1Day"];
 const LIVE_AGENTS_CACHE_TTL_MS = 20_000;
 let liveAgentsCache = null;
 let liveAgentsInFlight = null;
@@ -2014,6 +2221,43 @@ function buildDeepDiveDimension(technicals, fundamentals, pattern, strategiesApp
   };
 }
 
+function evaluateForexTradeGate(symbol, pattern, technicals, sentimentFlow, liveContext) {
+  const direction = pattern.candlestickBias;
+  const currencies = toCurrencyCodes(symbol);
+  const calendarRisk = liveContext?.calendarRiskByCurrency || {};
+  const pairEventCount = Number(calendarRisk[currencies.base] || 0) + Number(calendarRisk[currencies.quote] || 0);
+  const atDirectionalLevel = direction === "up"
+    ? pattern.isAtSupport
+    : direction === "down"
+      ? pattern.isAtResistance
+      : false;
+  const trendConfirmed = direction === "up"
+    ? technicals.ema20 >= technicals.ema50 && technicals.sma50 <= technicals.ema20 && technicals.macdHistogram >= 0
+    : direction === "down"
+      ? technicals.ema20 <= technicals.ema50 && technicals.sma50 >= technicals.ema20 && technicals.macdHistogram <= 0
+      : false;
+  const volatilityValid = technicals.bollingerWidthPercent >= 0.25
+    && technicals.bollingerWidthPercent <= 3.5
+    && technicals.volatilityPercent > 0
+    && technicals.volatilityPercent <= 2.5;
+  const volumeConfirmed = pattern.volumeConfirmation === "strong" && pattern.volumeImpactScore > 0;
+  const sentimentAligned = sentimentFlow.impactScore >= 0;
+  const calendarSafe = pairEventCount === 0;
+  const alignedDirection = direction !== "neutral" && pattern.direction === direction;
+
+  const checks = [
+    { name: "Directional candle", passed: alignedDirection },
+    { name: "Support/resistance zone", passed: atDirectionalLevel },
+    { name: "EMA/SMA + MACD trend", passed: trendConfirmed },
+    { name: "Volatility range", passed: volatilityValid },
+    { name: "Volume/range confirmation", passed: volumeConfirmed },
+    { name: "Sentiment/flow", passed: sentimentAligned },
+    { name: "Economic calendar", passed: calendarSafe }
+  ];
+
+  return { allowed: checks.every((check) => check.passed), checks };
+}
+
 function buildTradePlan(price, support, resistance, direction, pattern, confidence, timeframe, category) {
   const isForex = category === "forex";
   const range = Math.max(resistance - support, price * 0.0025);
@@ -2027,35 +2271,36 @@ function buildTradePlan(price, support, resistance, direction, pattern, confiden
         : 1.8;
 
   if (isForex) {
-    const stopDistance = Math.max(0.0008, Math.min(price * 0.003, price * 0.0012));
-    const profitDistance = stopDistance * rewardMultiplier;
+    const minimumDistance = Math.max(0.0008, price * 0.0012);
 
     if (direction === "up") {
       const entry = price;
-      const stopLoss = entry - stopDistance;
-      const takeProfit = entry + profitDistance;
-      const trailingStopLoss = entry - stopDistance * 0.6;
+      const stopLoss = Math.min(support * 0.999, entry - minimumDistance);
+      const risk = Math.max(entry - stopLoss, minimumDistance);
+      const takeProfit = entry + risk * rewardMultiplier;
+      const trailingStopLoss = entry - risk * 0.6;
       return {
         entry: roundTo(entry),
         stopLoss: roundTo(stopLoss),
         takeProfit: roundTo(takeProfit),
         trailingStopLoss: roundTo(trailingStopLoss),
-        trailingStopPercent: roundTo((stopDistance / entry) * 100, 2),
+        trailingStopPercent: roundTo((risk / entry) * 100, 2),
         riskRewardRatio: roundTo((takeProfit - entry) / Math.max(entry - stopLoss, 0.0000001), 2)
       };
     }
 
     if (direction === "down") {
       const entry = price;
-      const stopLoss = entry + stopDistance;
-      const takeProfit = entry - profitDistance;
-      const trailingStopLoss = entry + stopDistance * 0.6;
+      const stopLoss = Math.max(resistance * 1.001, entry + minimumDistance);
+      const risk = Math.max(stopLoss - entry, minimumDistance);
+      const takeProfit = entry - risk * rewardMultiplier;
+      const trailingStopLoss = entry + risk * 0.6;
       return {
         entry: roundTo(entry),
         stopLoss: roundTo(stopLoss),
         takeProfit: roundTo(takeProfit),
         trailingStopLoss: roundTo(trailingStopLoss),
-        trailingStopPercent: roundTo((stopDistance / entry) * 100, 2),
+        trailingStopPercent: roundTo((risk / entry) * 100, 2),
         riskRewardRatio: roundTo((entry - takeProfit) / Math.max(stopLoss - entry, 0.0000001), 2)
       };
     }
@@ -2119,7 +2364,9 @@ function buildTradePlan(price, support, resistance, direction, pattern, confiden
 }
 
 function buildSignal(symbol, category, timeframe, pattern, candles, source, liveSpotPrice, sentimentFlowContext) {
-  if (!pattern.candlestickPattern || pattern.candlestickPattern === "none") {
+  const hasRecognizedCandle = Boolean(pattern.candlestickPattern && pattern.candlestickPattern !== "none");
+  const hasUsableConfidence = pattern.confidence >= 60;
+  if (!hasRecognizedCandle && !hasUsableConfidence) {
     return null;
   }
 
@@ -2132,6 +2379,9 @@ function buildSignal(symbol, category, timeframe, pattern, candles, source, live
   const technicals = buildTechnicalAnalysis(symbol, timeframe, candles, pattern.support, pattern.resistance);
   const fundamentals = buildFundamentalAnalysis(category, symbol, pattern.direction);
   const sentimentFlow = buildSentimentFlowProxy(symbol, timeframe, pattern.direction, pattern.pattern, technicals, fundamentals, sentimentFlowContext);
+  if (category === "forex") {
+    evaluateForexTradeGate(symbol, pattern, technicals, sentimentFlow, sentimentFlowContext);
+  }
   const confidence = Math.round(clamp(Math.round(pattern.confidence) + sentimentFlow.impactScore, 45, 94));
   const tradePlan = buildTradePlan(currentPrice, pattern.support, pattern.resistance, pattern.direction, pattern.pattern, confidence, timeframe, category);
   const deepDive = buildDeepDiveDimension(technicals, fundamentals, pattern, strategiesApplied);
@@ -2179,13 +2429,18 @@ function pickBestSignal(signals) {
 
 async function buildLiveAgents() {
   const reports = [];
+  const forexValidation = [];
   const sources = new Set();
   const generatedAt = new Date().toISOString();
   const mt4MidPrices = buildMt4MidPriceMap();
   const sentimentFlowContext = await fetchSentimentFlowContext();
 
   for (const config of AGENT_CONFIG) {
-    const history = await getLiveHistory(config.symbols, ANALYSIS_TIMEFRAMES, 5);
+    const recommendationTimeframes = config.category === "forex" ? FOREX_VALIDATION_TIMEFRAMES : ANALYSIS_TIMEFRAMES;
+    const history = await getLiveHistory(config.symbols, recommendationTimeframes, 5);
+    if (history.source === "live" || history.source === "derived") {
+      sources.add(history.source);
+    }
     const symbolReports = [];
     const agentSignals = [];
 
@@ -2194,11 +2449,29 @@ async function buildLiveAgents() {
         ? (resolveLiveSpotPriceFromMt4(symbol, mt4MidPrices) ?? await fetchYahooForexSpotPrice(HISTORY_SYMBOLS[symbol].yahooCode))
         : null;
       const symbolHistory = history.data[symbol] || {};
-      const timeframeSignals = ANALYSIS_TIMEFRAMES.map((timeframe) => {
+      const timeframeSignals = recommendationTimeframes.map((timeframe) => {
         const frame = symbolHistory[timeframe];
         const pattern = history.patterns.find((item) => item.symbol === symbol && item.timeframe === timeframe);
         if (!frame || !pattern) {
           return null;
+        }
+
+        if (config.category === "forex") {
+          const technicals = buildTechnicalAnalysis(symbol, timeframe, frame.candles, pattern.support, pattern.resistance);
+          const fundamentals = buildFundamentalAnalysis(config.category, symbol, pattern.direction);
+          const sentimentFlow = buildSentimentFlowProxy(symbol, timeframe, pattern.direction, pattern.pattern, technicals, fundamentals, sentimentFlowContext);
+          const gate = evaluateForexTradeGate(symbol, pattern, technicals, sentimentFlow, sentimentFlowContext);
+          forexValidation.push({
+            symbol,
+            timeframe,
+            status: gate.allowed ? (pattern.direction === "up" ? "BUY" : "SELL") : "NO TRADE",
+            pattern: pattern.candlestickPattern,
+            direction: pattern.direction,
+            checks: gate.checks,
+            support: roundTo(pattern.support),
+            resistance: roundTo(pattern.resistance),
+            currentPrice: roundTo(liveSpotPrice ?? frame.candles[frame.candles.length - 1]?.c ?? pattern.latestClose)
+          });
         }
 
         const signal = buildSignal(symbol, config.category, timeframe, pattern, frame.candles, frame.source, config.category === "forex" ? liveSpotPrice : null, sentimentFlowContext);
@@ -2275,6 +2548,7 @@ async function buildLiveAgents() {
 
   return {
     data: reports,
+    forexValidation,
     source,
     reason: "Three analysis agents built from live/derived price history with technical indicators, macro drivers, strategy plans, and graph placeholders.",
     generatedAt
@@ -3536,8 +3810,37 @@ exports.handler = async (event) => {
       }
 
       const snapshot = await getMt4Snapshot();
+      if (snapshot && snapshot.healthStatus === "fresh" && Array.isArray(snapshot.quotes) && snapshot.quotes.length > 0) {
+        return json(200, {
+          source: snapshot.source,
+          receivedAt: snapshot.receivedAt,
+          timestamp: snapshot.timestamp,
+          heartbeat: snapshot.heartbeat,
+          ageSeconds: snapshot.ageSeconds,
+          healthStatus: snapshot.healthStatus,
+          healthNote: snapshot.healthNote,
+          quotes: snapshot.quotes
+        });
+      }
+
+      const fallback = await getLiveForexQuoteFeed(Object.keys(HISTORY_SYMBOLS).filter((symbol) => HISTORY_SYMBOLS[symbol].category === "forex"));
+      if (fallback.quotes.length > 0) {
+        return json(200, {
+          source: "api-fallback",
+          provider: fallback.provider,
+          receivedAt: fallback.timestamp,
+          timestamp: fallback.timestamp,
+          ageSeconds: 0,
+          healthStatus: "fresh",
+          healthNote: snapshot
+            ? `MT5 snapshot ${snapshot.healthStatus}; serving live API quotes until broker connectivity recovers`
+            : "MT5 snapshot unavailable; serving live API quotes",
+          quotes: fallback.quotes
+        });
+      }
+
       if (!snapshot) {
-        return json(404, { error: "No MT4 snapshot received yet" });
+        return json(503, { error: "MT5 snapshot unavailable and live API providers are unavailable" });
       }
 
       return json(200, {
@@ -3547,7 +3850,7 @@ exports.handler = async (event) => {
         heartbeat: snapshot.heartbeat,
         ageSeconds: snapshot.ageSeconds,
         healthStatus: snapshot.healthStatus,
-        healthNote: snapshot.healthNote,
+        healthNote: `${snapshot.healthNote}; live API providers unavailable`,
         quotes: Array.isArray(snapshot.quotes) ? snapshot.quotes : []
       });
     }

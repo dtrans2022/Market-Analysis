@@ -6,7 +6,7 @@ export type MarketAgentName = "Forex" | "Commodities" | "Oil";
 
 export type MarketPatternKind = "trend" | "range" | "breakout" | "reversal" | "momentum" | "compression";
 
-export type MarketAgentAnalysisTimeframe = HistoryTimeframe;
+export type MarketAgentAnalysisTimeframe = Exclude<HistoryTimeframe, "15minute" | "30minute">;
 
 export type MarketAgentTradePlan = {
   entry: number;
@@ -241,6 +241,7 @@ const AGENT_CONFIG: Array<{
 ];
 
 const ANALYSIS_TIMEFRAMES: MarketAgentAnalysisTimeframe[] = ["1hour", "4hour", "12hour", "1Day", "1Week"];
+const FOREX_VALIDATION_TIMEFRAMES: MarketAgentAnalysisTimeframe[] = ["1hour", "4hour", "12hour", "1Day"];
 const MONITORING_TIME_ZONE = "Australia/Sydney";
 const MONITORING_CONFIDENCE_THRESHOLD = 80;
 const MONITORING_START_DAY_KEY = currentSydneyDayKey();
@@ -1004,7 +1005,7 @@ function strategySummary(
   return `${pattern.pattern.toUpperCase()} on ${pattern.symbol} (${pattern.timeframe}) with ${Math.round(pattern.confidence)}% baseline confidence. ${trendNote} ${candleContext} Sentiment/flow impact ${sentimentFlow.impactScore >= 0 ? "+" : ""}${sentimentFlow.impactScore} (${sentimentFlow.summary}). ${technicals.summary} ${fundamentals.summary}`;
 }
 
-function buildSignal(
+export function buildSignal(
   symbol: string,
   category: MarketAssetCategory,
   timeframe: MarketAgentAnalysisTimeframe,
@@ -1014,7 +1015,9 @@ function buildSignal(
   liveSpotPrice?: number | null,
   calibrationStatsByTimeframe?: CalibrationStatsByTimeframe
 ): MarketAgentTimeframeSignal | null {
-  if (!pattern.candlestickPattern || pattern.candlestickPattern === "none") {
+  const hasRecognizedCandle = !!pattern.candlestickPattern && pattern.candlestickPattern !== "none";
+  const hasUsableConfidence = pattern.confidence >= 60;
+  if (!hasRecognizedCandle && !hasUsableConfidence) {
     return null;
   }
 
@@ -1119,7 +1122,7 @@ async function buildMarketAgentsAnalysis(): Promise<MarketAgentsResponse> {
   const sources = new Set<HistorySource>();
   const generatedAt = new Date().toISOString();
   const calibrationStatsByTimeframe = buildCalibrationStatsByTimeframe();
-  const mt4Snapshot = getLatestMt4Snapshot();
+  const mt4Snapshot = await getLatestMt4Snapshot();
   const mt4QuotesBySymbol = new Map<string, number>();
 
   if (mt4Snapshot?.quotes?.length) {
@@ -1136,7 +1139,8 @@ async function buildMarketAgentsAnalysis(): Promise<MarketAgentsResponse> {
   }
 
   for (const config of AGENT_CONFIG) {
-    const history = await getMarketHistory(config.symbols, ANALYSIS_TIMEFRAMES, 5);
+    const recommendationTimeframes: MarketAgentAnalysisTimeframe[] = config.category === "forex" ? FOREX_VALIDATION_TIMEFRAMES : ANALYSIS_TIMEFRAMES;
+    const history = await getMarketHistory(config.symbols, recommendationTimeframes, 5);
     const symbolReports: MarketAgentSymbolReport[] = [];
     const agentSignals: MarketAgentTimeframeSignal[] = [];
 
@@ -1145,7 +1149,7 @@ async function buildMarketAgentsAnalysis(): Promise<MarketAgentsResponse> {
         ? resolveLiveSpotPriceFromMt4(symbol, mt4QuotesBySymbol) ?? await getLiveForexSpotPrice(symbol)
         : null;
       const symbolHistory = history.data[symbol] ?? {};
-      const timeframeSignals = ANALYSIS_TIMEFRAMES
+      const timeframeSignals = recommendationTimeframes
         .map((timeframe) => {
           const frame = symbolHistory[timeframe];
           const pattern = history.patterns.find((item) => item.symbol === symbol && item.timeframe === timeframe);

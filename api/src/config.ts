@@ -12,6 +12,9 @@ const schema = z.object({
   SLACK_WEBHOOK_URLS: z.string().optional(),
   SLACK_NOTIFY_USER_IDS: z.string().optional(),
   MT4_SNAPSHOT_API_KEY: z.string().optional(),
+  SUPABASE_URL: z.string().url().optional(),
+  SUPABASE_SERVICE_ROLE_KEY: z.string().optional(),
+  SUPABASE_MT5_SNAPSHOT_TABLE: z.string().default("mt5_snapshots"),
   AUTO_NEWS_TO_SLACK_ENABLED: z
     .string()
     .optional()

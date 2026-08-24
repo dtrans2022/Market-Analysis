@@ -1,7 +1,7 @@
 import { Response, Router } from "express";
 import { z } from "zod";
 import { config } from "./config.js";
-import { getForexCandles, getMarketTrends } from "./services/marketService.js";
+import { getForexCandles, getLiveForexQuoteFeed, getMarketTrends } from "./services/marketService.js";
 import { getMarketHistory } from "./services/marketHistoryService.js";
 import {
   getForexTradeMonitoringHistoryReport,
@@ -40,7 +40,7 @@ const forexCandlesSchema = z.object({
 
 const marketHistorySchema = z.object({
   symbols: z.array(z.string().min(2)).min(1),
-  timeframes: z.array(z.enum(["1hour", "4hour", "12hour", "1Day", "1Week"])).min(1),
+  timeframes: z.array(z.enum(["15minute", "30minute", "1hour", "4hour", "12hour", "1Day", "1Week"])).min(1),
   years: z.coerce.number().int().min(1).max(10).optional().default(5)
 });
 
@@ -400,8 +400,8 @@ router.get("/api/market/forex-monitoring-history", async (req, res) => {
   }
 });
 
-router.get("/api/mt4/snapshot", (_req, res) => {
-  const snapshot = getLatestMt4Snapshot();
+router.get("/api/mt4/snapshot", async (_req, res) => {
+  const snapshot = await getLatestMt4Snapshot();
   if (!snapshot) {
     return res.status(404).json({
       error: "No MT4 snapshot received yet"
@@ -411,12 +411,47 @@ router.get("/api/mt4/snapshot", (_req, res) => {
   return res.json(snapshot);
 });
 
-router.get("/api/mt4/quotes", (_req, res) => {
-  const snapshot = getLatestMt4Snapshot();
-  if (!snapshot) {
-    return res.status(404).json({
-      error: "No MT4 snapshot received yet"
+router.get("/api/mt4/quotes", async (_req, res) => {
+  const snapshot = await getLatestMt4Snapshot();
+  if (snapshot?.healthStatus === "fresh" && (snapshot.quotes?.length ?? 0) > 0) {
+    return res.json({
+      source: snapshot.source,
+      receivedAt: snapshot.receivedAt,
+      timestamp: snapshot.timestamp,
+      heartbeat: snapshot.heartbeat,
+      ageSeconds: snapshot.ageSeconds,
+      healthStatus: snapshot.healthStatus,
+      healthNote: snapshot.healthNote,
+      quotes: snapshot.quotes ?? []
     });
+  }
+
+  try {
+    const fallback = await getLiveForexQuoteFeed([
+      "AUD/USD", "USD/JPY", "EUR/USD", "GBP/USD", "AUD/JPY", "EUR/AUD", "GBP/AUD",
+      "AUD/NZD", "EUR/NZD", "EUR/GBP", "CAD/JPY", "USD/CAD", "USD/CHF", "GBP/NZD",
+      "NZD/JPY", "AUD/CHF", "EUR/CAD", "EUR/JPY"
+    ]);
+    if (fallback.quotes.length > 0) {
+      return res.json({
+        source: "api-fallback",
+        provider: fallback.provider,
+        receivedAt: fallback.timestamp,
+        timestamp: fallback.timestamp,
+        ageSeconds: 0,
+        healthStatus: "fresh",
+        healthNote: snapshot
+          ? `MT5 snapshot ${snapshot.healthStatus}; serving live API quotes until broker connectivity recovers`
+          : "MT5 snapshot unavailable; serving live API quotes",
+        quotes: fallback.quotes
+      });
+    }
+  } catch {
+    // Return the broker status below when every fallback provider is unavailable.
+  }
+
+  if (!snapshot) {
+    return res.status(503).json({ error: "MT5 snapshot unavailable and live API providers are unavailable" });
   }
 
   return res.json({
@@ -426,12 +461,12 @@ router.get("/api/mt4/quotes", (_req, res) => {
     heartbeat: snapshot.heartbeat,
     ageSeconds: snapshot.ageSeconds,
     healthStatus: snapshot.healthStatus,
-    healthNote: snapshot.healthNote,
+    healthNote: `${snapshot.healthNote}; live API providers unavailable`,
     quotes: snapshot.quotes ?? []
   });
 });
 
-router.post("/api/mt4/snapshot", (req, res) => {
+router.post("/api/mt4/snapshot", async (req, res) => {
   if (config.MT4_SNAPSHOT_API_KEY) {
     const providedKey = req.header("x-api-key") ?? "";
     if (providedKey !== config.MT4_SNAPSHOT_API_KEY) {
@@ -449,7 +484,7 @@ router.post("/api/mt4/snapshot", (req, res) => {
     });
   }
 
-  return res.status(202).json(storeMt4Snapshot(parsed.data));
+  return res.status(202).json(await storeMt4Snapshot(parsed.data));
 });
 
 router.get("/api/notify/status", (_req, res) => {

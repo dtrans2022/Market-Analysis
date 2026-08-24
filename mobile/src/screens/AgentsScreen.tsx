@@ -5,7 +5,7 @@ import { API_BASE_URL, REFRESH_INTERVAL_MS } from "../constants";
 import { usePollingData } from "../hooks/usePollingData";
 import { theme } from "../theme";
 import { SectionCard } from "../components/SectionCard";
-import { ForexTradeMonitoringReport, MarketAgentReport, MarketAgentTimeframeSignal, Mt4Quote } from "../types";
+import { ForexTradeMonitoringReport, ForexValidationItem, MarketAgentReport, MarketAgentTimeframeSignal, Mt4Quote } from "../types";
 
 const TIMEFRAME_ORDER: Record<string, number> = {
   "1hour": 1,
@@ -20,7 +20,7 @@ const AGENT_MENU = [
   { key: "commodities", label: "Commodities Analysis", match: "Commodities" },
   { key: "oil", label: "Oil Analysis", match: "Oil" }
 ] as const;
-const MT4_QUOTES_REFRESH_MS = Platform.OS === "web" ? 5_000 : 3_000;
+const MT4_QUOTES_REFRESH_MS = Platform.OS === "web" ? 60_000 : 30_000;
 const MAX_LIVE_QUOTE_AGE_SECONDS = 30;
 
 function sourceColor(source: string) {
@@ -671,7 +671,7 @@ function AgentCard({
                       Trend structure impact: {trendImpact}
                     </Text>
                     <Text style={styles.analysisText}>
-                      Historical recurrence: {signal.historicalRecurrenceSummary ?? "No comparable prior zone repeats found."} | impact {historicalRecurrence}
+                      Historical recurrence: {signal.historicalRecurrenceSummary ?? "No comparable prior zone repeats found."} | impact {typeof signal.historicalRecurrenceScore === "number" ? `${signal.historicalRecurrenceScore >= 0 ? "+" : ""}${signal.historicalRecurrenceScore}` : "0"}
                     </Text>
                     <Text style={styles.analysisText}>
                       Volatility regime: Bollinger width {signal.technicals.bollingerWidthPercent.toFixed(2)}% | ATR {signal.technicals.atrPercent.toFixed(2)}% | IV proxy {signal.technicals.impliedVolatilityPercent.toFixed(2)}% | Vol {signal.technicals.volatilityPercent.toFixed(2)}%
@@ -798,6 +798,26 @@ function AgentCard({
   );
 }
 
+function ForexValidationPanel({ items }: { items: ForexValidationItem[] }) {
+  return (
+    <View style={styles.validationPanel}>
+      <Text style={styles.validationPanelTitle}>Forex Strategy Validation</Text>
+      <Text style={styles.validationPanelHint}>Strict 1h, 4h, 12h, and daily confluence checks</Text>
+      {items.length === 0 ? <Text style={styles.muted}>No Forex validation results are available.</Text> : null}
+      {items.map((item) => (
+        <View key={`${item.symbol}-${item.timeframe}`} style={styles.validationRow}>
+          <View style={styles.validationHeader}>
+            <Text style={styles.validationTitle}>{item.symbol} | {item.timeframe}</Text>
+            <Text style={[styles.validationStatus, { color: item.status === "BUY" ? theme.colors.positive : item.status === "SELL" ? theme.colors.negative : theme.colors.warning }]}>{item.status}</Text>
+          </View>
+          <Text style={styles.validationMeta}>{formatCandlestickPattern(item.pattern)} | {item.direction.toUpperCase()} | Price {formatPrice(item.currentPrice)} | S {formatPrice(item.support)} R {formatPrice(item.resistance)}</Text>
+          <Text style={styles.validationChecks}>{item.checks.map((check) => `${check.passed ? "PASS" : "FAIL"}: ${check.name}`).join(" | ")}</Text>
+        </View>
+      ))}
+    </View>
+  );
+}
+
 export function AgentsScreen() {
   const { data, loading, error } = usePollingData(fetchMarketAgents, REFRESH_INTERVAL_MS, undefined, {
     keepPreviousDataOnError: false
@@ -811,6 +831,7 @@ export function AgentsScreen() {
   const [monitoringReportExpanded, setMonitoringReportExpanded] = useState(false);
 
   const agents = data?.data ?? [];
+  const forexValidation = data?.forexValidation ?? [];
   const selectedMenu = AGENT_MENU.find((item) => item.key === selectedAgentKey) ?? AGENT_MENU[0];
   const selectedAgent = agents.find((agent) => agent.agent === selectedMenu.match) ?? agents[0] ?? null;
   const isCompactLayout = width < 900;
@@ -885,6 +906,7 @@ export function AgentsScreen() {
               ) : (
                 <Text style={styles.muted}>No agent data available.</Text>
               )}
+              {selectedMenu.match === "Forex" ? <ForexValidationPanel items={forexValidation} /> : null}
             </View>
           </View>
         ) : null}
@@ -1136,6 +1158,55 @@ const styles = StyleSheet.create({
   },
   agentContentPanel: {
     flex: 1
+  },
+  validationPanel: {
+    borderWidth: 1,
+    borderColor: "#2d7a8b",
+    backgroundColor: "#102b3b",
+    borderRadius: 8,
+    padding: 10,
+    marginBottom: 12
+  },
+  validationPanelTitle: {
+    color: theme.colors.text,
+    fontSize: 14,
+    fontWeight: "800"
+  },
+  validationPanelHint: {
+    color: theme.colors.muted,
+    fontSize: 11,
+    marginTop: 2,
+    marginBottom: 6
+  },
+  validationRow: {
+    borderTopWidth: 1,
+    borderTopColor: "#23546e",
+    paddingTop: 7,
+    marginTop: 7
+  },
+  validationHeader: {
+    flexDirection: "row",
+    justifyContent: "space-between"
+  },
+  validationTitle: {
+    color: theme.colors.text,
+    fontSize: 12,
+    fontWeight: "800"
+  },
+  validationStatus: {
+    fontSize: 12,
+    fontWeight: "800"
+  },
+  validationMeta: {
+    color: theme.colors.muted,
+    fontSize: 11,
+    marginTop: 2
+  },
+  validationChecks: {
+    color: theme.colors.text,
+    fontSize: 11,
+    lineHeight: 16,
+    marginTop: 3
   },
   agentCard: {
     borderWidth: 1,

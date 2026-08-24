@@ -106,7 +106,7 @@ export type ForexCandlesResponse = {
   years: number;
 };
 
-export type MarketHistoryTimeframe = "1hour" | "4hour" | "12hour" | "1Day" | "1Week";
+export type MarketHistoryTimeframe = "15minute" | "30minute" | "1hour" | "4hour" | "12hour" | "1Day" | "1Week";
 
 export type MarketHistorySource = "live" | "derived" | "fallback" | "mixed";
 
@@ -183,15 +183,42 @@ export type MarketHistoryFrame = {
   candles: OhlcCandle[];
   source: MarketHistorySource;
   note?: string;
+  coverageDays: number;
+  hasRequestedCoverage: boolean;
 };
 
 export type MarketHistoryResponse = {
   data: Record<string, Partial<Record<MarketHistoryTimeframe, MarketHistoryFrame>>>;
   patterns: MarketPatternSignal[];
+  candlestickOutcomes: Record<string, Partial<Record<MarketHistoryTimeframe, CandlestickOutcomeSummary[]>>>;
   source: MarketHistorySource;
   reason?: string;
   years: number;
   timeframes: MarketHistoryTimeframe[];
+};
+
+export type CandlestickOutcomeSummary = {
+  pattern: CandlestickPattern;
+  formations: number;
+  expectedDirectionCount: number;
+  oppositeDirectionCount: number;
+  neutralOutcomeCount: number;
+  successRate: number | null;
+  atSupportCount: number;
+  atResistanceCount: number;
+  details: CandlestickOutcomeDetail[];
+};
+
+export type CandlestickOutcomeDetail = {
+  timestamp: number;
+  expectedDirection: "up" | "down" | "neutral";
+  outcome: "successful" | "unsuccessful" | "neutral";
+  formedAt: "support" | "resistance" | "support-and-resistance";
+  entryClose: number;
+  followThroughClose: number;
+  volume: number | null;
+  volumeRatio: number | null;
+  note: string;
 };
 
 export type MarketAgentName = "Forex" | "Commodities" | "Oil";
@@ -213,6 +240,9 @@ export type MarketAgentTechnicalAnalysis = {
   bollingerMiddle: number;
   bollingerLower: number;
   bollingerWidthPercent: number;
+  atrPercent: number;
+  impliedVolatilityPercent: number;
+  rsi14: number;
   macdLine: number;
   macdSignal: number;
   macdHistogram: number;
@@ -253,6 +283,8 @@ export type MarketAgentTimeframeSignal = {
   volumeRatio?: number | null;
   volumeImpactScore?: number;
   trendImpactScore?: number;
+  historicalRecurrenceScore?: number;
+  historicalRecurrenceSummary?: string;
   sentimentFlowImpactScore?: number;
   sentimentFlowSummary?: string;
   sentimentFlowBreakdown?: {
@@ -312,9 +344,22 @@ export type MarketAgentReport = {
 
 export type MarketAgentsResponse = {
   data: MarketAgentReport[];
+  forexValidation?: ForexValidationItem[];
   source: MarketHistorySource;
   reason?: string;
   generatedAt: string;
+};
+
+export type ForexValidationItem = {
+  symbol: string;
+  timeframe: MarketHistoryTimeframe;
+  status: "BUY" | "SELL" | "NO TRADE";
+  pattern: CandlestickPattern;
+  direction: "up" | "down" | "neutral";
+  checks: Array<{ name: string; passed: boolean }>;
+  support: number;
+  resistance: number;
+  currentPrice: number;
 };
 
 export type ForexTradeMonitoringStatus = "tp-hit" | "sl-hit" | "open";
@@ -426,7 +471,8 @@ export type Mt4SnapshotResponse = Mt4Snapshot & {
 };
 
 export type Mt4QuoteFeedResponse = {
-  source: "mt4";
+  source: "mt4" | "api-fallback";
+  provider?: string;
   receivedAt: string;
   timestamp: string;
   heartbeat?: number;

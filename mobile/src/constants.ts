@@ -1,5 +1,21 @@
 import { Platform } from "react-native";
 
+type ExpoPublicEnv = {
+  EXPO_PUBLIC_API_BASE_URL?: string;
+  EXPO_PUBLIC_PROD_API_BASE_URL?: string;
+  [key: string]: string | undefined;
+};
+
+const expoPublicEnv = (
+  globalThis as typeof globalThis & {
+    process?: { env?: ExpoPublicEnv };
+  }
+).process?.env ?? {};
+
+function readExpoEnv(key: keyof ExpoPublicEnv) {
+  return expoPublicEnv[key];
+}
+
 function defaultApiBaseUrl() {
 	if (Platform.OS === "web") {
 		if (typeof window !== "undefined" && window.location.hostname === "localhost") {
@@ -7,7 +23,7 @@ function defaultApiBaseUrl() {
 		}
 
 		// Hosted web deployments should call the deployed HTTPS API by default.
-		return process.env.EXPO_PUBLIC_PROD_API_BASE_URL ?? "https://qhpokqaxb234i7pk7ubxjmywkq0nugeq.lambda-url.ap-southeast-2.on.aws";
+		return readExpoEnv("EXPO_PUBLIC_PROD_API_BASE_URL") ?? "https://qhpokqaxb234i7pk7ubxjmywkq0nugeq.lambda-url.ap-southeast-2.on.aws";
 	}
 
 	if (Platform.OS === "android") {
@@ -18,12 +34,12 @@ function defaultApiBaseUrl() {
 	return "http://localhost:8080";
 }
 
-export const API_BASE_URL = process.env.EXPO_PUBLIC_API_BASE_URL ?? defaultApiBaseUrl();
+export const API_BASE_URL = readExpoEnv("EXPO_PUBLIC_API_BASE_URL") ?? defaultApiBaseUrl();
 export const API_BASE_URL_CANDIDATES = Array.from(
 	new Set(
 		[
-			process.env.EXPO_PUBLIC_API_BASE_URL,
-			process.env.EXPO_PUBLIC_PROD_API_BASE_URL,
+			readExpoEnv("EXPO_PUBLIC_API_BASE_URL"),
+			readExpoEnv("EXPO_PUBLIC_PROD_API_BASE_URL"),
 			defaultApiBaseUrl(),
 			"https://qhpokqaxb234i7pk7ubxjmywkq0nugeq.lambda-url.ap-southeast-2.on.aws",
 			"",

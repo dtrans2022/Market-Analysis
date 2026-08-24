@@ -1,414 +1,101 @@
-import { useEffect, useMemo, useState } from "react";
-import { Pressable, StyleSheet, Text, View } from "react-native";
+import { useEffect, useState } from "react";
+import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { fetchMarketHistory } from "../api/client";
 import { SectionCard } from "../components/SectionCard";
 import { theme } from "../theme";
-import { MarketHistoryResponse, MarketHistoryTimeframe, OhlcCandle } from "../types";
+import { CandlestickOutcomeDetail, CandlestickOutcomeSummary, MarketHistoryResponse } from "../types";
 
-const ASSET_SYMBOLS = {
-  forex: ["EUR/USD", "GBP/USD", "USD/JPY"],
-  commodity: ["XAU/USD", "XAG/USD"],
-  oil: ["BRENT", "WTI"]
-} as const;
+const CURRENCY_PAIRS = [
+  "AUD/USD", "AUD/CHF", "AUD/JPY", "AUD/NZD", "CAD/JPY", "EUR/AUD", "EUR/CAD", "EUR/GBP", "EUR/JPY",
+  "EUR/NZD", "EUR/USD", "GBP/AUD", "GBP/NZD", "GBP/USD", "NZD/JPY", "USD/CAD", "USD/CHF", "USD/JPY"
+];
 
-const TIMEFRAMES: MarketHistoryTimeframe[] = ["1hour", "4hour", "12hour", "1Day", "1Week"];
+type ReportRow = { pair: string; summary: CandlestickOutcomeSummary };
+type DetailFilter = "occurred" | "successful" | "unsuccessful" | "neutral";
 
-type AssetKey = keyof typeof ASSET_SYMBOLS;
-type MarketSymbol = (typeof ASSET_SYMBOLS)[AssetKey][number];
-
-function formatPrice(value: number) {
-  return value > 20 ? value.toFixed(2) : value.toFixed(4);
+function labelPattern(pattern: string) {
+  return pattern.replaceAll("-", " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
-function formatTimeframeLabel(timeframe: MarketHistoryTimeframe) {
-  switch (timeframe) {
-    case "1hour":
-      return "1 hour";
-    case "4hour":
-      return "4 hour";
-    case "12hour":
-      return "12 hour";
-    case "1Day":
-      return "1 day";
-    case "1Week":
-      return "1 week";
-    default:
-      return timeframe;
-  }
+function volumeLabel(detail: CandlestickOutcomeDetail) {
+  return detail.volumeRatio == null ? "Volume unavailable" : `${detail.volumeRatio}x of prior 20-day average`;
 }
 
-function sourceColor(source: string) {
-  if (source === "live") {
-    return { color: theme.colors.positive };
-  }
-
-  if (source === "derived") {
-    return { color: theme.colors.warning };
-  }
-
-  if (source === "mixed") {
-    return { color: theme.colors.accent };
-  }
-
-  return { color: theme.colors.negative };
-}
-
-function directionColor(direction: string) {
-  if (direction === "up") {
-    return theme.colors.positive;
-  }
-
-  if (direction === "down") {
-    return theme.colors.negative;
-  }
-
-  return theme.colors.warning;
-}
-
-function buildSparkline(candles: OhlcCandle[], targetPoints = 24) {
-  if (candles.length === 0) {
-    return [] as number[];
-  }
-
-  const closes = candles.map((candle) => candle.c);
-  if (closes.length <= targetPoints) {
-    return closes;
-  }
-
-  const step = closes.length / targetPoints;
-  const points: number[] = [];
-  for (let index = 0; index < targetPoints; index += 1) {
-    const start = Math.floor(index * step);
-    const end = Math.min(closes.length, Math.floor((index + 1) * step));
-    const chunk = closes.slice(start, Math.max(start + 1, end));
-    points.push(chunk[chunk.length - 1]);
-  }
-
-  return points;
-}
-
-function MiniChart({ candles }: { candles: OhlcCandle[] }) {
-  const points = useMemo(() => buildSparkline(candles), [candles]);
-
-  if (points.length === 0) {
-    return <Text style={styles.chartFallback}>No candle history returned.</Text>;
-  }
-
-  const min = Math.min(...points);
-  const max = Math.max(...points);
-  const span = Math.max(max - min, 0.0000001);
-
-  return (
-    <View style={styles.chartWrap}>
-      {points.map((point, index) => {
-        const height = 20 + ((point - min) / span) * 52;
-        return <View key={`spark-${index}`} style={[styles.sparkBar, { height }]} />;
-      })}
-    </View>
-  );
+function formatCandleSession(timestamp: number) {
+  const date = new Date(timestamp * 1000);
+  const utcDate = date.toISOString().slice(0, 10);
+  const sydneyDate = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Australia/Sydney",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  }).format(date);
+  return `Source UTC ${utcDate} | Sydney ${sydneyDate}`;
 }
 
 export function HistoryScreen() {
-  const [selectedAsset, setSelectedAsset] = useState<AssetKey>("forex");
-  const [selectedSymbol, setSelectedSymbol] = useState<MarketSymbol>(ASSET_SYMBOLS.forex[0]);
   const [history, setHistory] = useState<MarketHistoryResponse | null>(null);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-
-  const symbols = ASSET_SYMBOLS[selectedAsset] as readonly MarketSymbol[];
-
-  useEffect(() => {
-    if (!symbols.includes(selectedSymbol)) {
-      setSelectedSymbol(symbols[0]);
-    }
-  }, [selectedAsset, selectedSymbol, symbols]);
+  const [selectedPair, setSelectedPair] = useState<string | null>(null);
+  const [detail, setDetail] = useState<{ row: ReportRow; filter: DetailFilter } | null>(null);
 
   useEffect(() => {
     let cancelled = false;
-
-    async function loadHistory() {
+    async function load() {
       setLoading(true);
-      setError(null);
-
       try {
-        const response = await fetchMarketHistory([selectedSymbol], TIMEFRAMES, 5);
-        if (cancelled) {
-          return;
-        }
-
-        setHistory(response);
+        const response = await fetchMarketHistory(CURRENCY_PAIRS, ["1Day"], 5);
+        if (!cancelled) setHistory(response);
       } catch (loadError) {
-        if (!cancelled) {
-          setHistory(null);
-          setError(loadError instanceof Error ? loadError.message : "Failed to load market history");
-        }
+        if (!cancelled) setError(loadError instanceof Error ? loadError.message : "Unable to load daily pattern history");
       } finally {
-        if (!cancelled) {
-          setLoading(false);
-        }
+        if (!cancelled) setLoading(false);
       }
     }
+    void load();
+    return () => { cancelled = true; };
+  }, []);
 
-    void loadHistory();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [selectedSymbol]);
-
-  const symbolHistory = history?.data[selectedSymbol] ?? {};
-  const patternRows = history?.patterns.filter((pattern) => pattern.symbol === selectedSymbol) ?? [];
+  const rows: ReportRow[] = CURRENCY_PAIRS.flatMap((pair) => (history?.candlestickOutcomes[pair]?.["1Day"] ?? [])
+    .filter((summary) => summary.formations > 0)
+    .map((summary) => ({ pair, summary })))
+    .filter((row) => !selectedPair || row.pair === selectedPair)
+    .sort((left, right) => right.summary.formations - left.summary.formations || left.pair.localeCompare(right.pair));
 
   return (
     <View>
-      <SectionCard title="Market History & Pattern Skills" subtitle="5-year historical candles and classification by timeframe">
-        <Text style={styles.description}>
-          Built for forex, commodities, and oil with live- or derived-backed historical series for the selected symbol.
-        </Text>
-
-        <View style={styles.assetRow}>
-          {(Object.keys(ASSET_SYMBOLS) as AssetKey[]).map((asset) => (
-            <Pressable
-              key={asset}
-              onPress={() => setSelectedAsset(asset)}
-              style={[styles.assetChip, selectedAsset === asset ? styles.assetChipActive : null]}
-            >
-              <Text style={[styles.assetChipText, selectedAsset === asset ? styles.assetChipTextActive : null]}>
-                {asset === "commodity" ? "Commodities" : asset === "oil" ? "Oil" : "Forex"}
-              </Text>
-            </Pressable>
-          ))}
-        </View>
-
-        <View style={styles.symbolRow}>
-          {symbols.map((symbol) => (
-            <Pressable
-              key={symbol}
-              onPress={() => setSelectedSymbol(symbol)}
-              style={[styles.symbolChip, selectedSymbol === symbol ? styles.symbolChipActive : null]}
-            >
-              <Text style={[styles.symbolChipText, selectedSymbol === symbol ? styles.symbolChipTextActive : null]}>
-                {symbol}
-              </Text>
-            </Pressable>
-          ))}
-        </View>
-
-        {loading ? <Text style={styles.muted}>Loading history and pattern signals...</Text> : null}
-        {error ? <Text style={styles.error}>{error}</Text> : null}
-        {history ? (
-          <Text style={[styles.source, sourceColor(history.source)]}>
-            Source: {history.source}
-            {history.reason ? ` (${history.reason})` : ""}
-          </Text>
-        ) : null}
-
-        {patternRows.length > 0 ? (
-          <View style={styles.patternSummary}>
-            {patternRows.slice(0, 3).map((pattern) => (
-              <View key={`${pattern.symbol}-${pattern.timeframe}`} style={styles.patternBadge}>
-                <Text style={[styles.patternBadgeTitle, { color: directionColor(pattern.direction) }]}>
-                  {formatTimeframeLabel(pattern.timeframe)} {pattern.pattern}
-                </Text>
-                <Text style={styles.patternBadgeText}>
-                  {pattern.direction.toUpperCase()} | Signal {pattern.confidence}%
-                </Text>
-              </View>
-            ))}
+      <SectionCard title="Daily Candlestick Pattern Report" subtitle="Five-year daily analysis across all forex pairs">
+        <Text style={styles.intro}>Patterns are counted only when formed at rolling support or resistance. Success means the close five daily bars later moved in the pattern's expected direction.</Text>
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.filters}>
+          <View style={styles.filterRow}>
+            <Pressable onPress={() => setSelectedPair(null)} style={[styles.filter, !selectedPair && styles.filterActive]}><Text style={styles.filterText}>All pairs</Text></Pressable>
+            {CURRENCY_PAIRS.map((pair) => <Pressable key={pair} onPress={() => setSelectedPair(pair)} style={[styles.filter, selectedPair === pair && styles.filterActive]}><Text style={styles.filterText}>{pair}</Text></Pressable>)}
           </View>
-        ) : null}
-
-        {TIMEFRAMES.map((timeframe) => {
-          const frame = symbolHistory[timeframe];
-          const pattern = patternRows.find((item) => item.timeframe === timeframe);
-          const candles = frame?.candles ?? [];
-          const latest = candles[candles.length - 1];
-
-          return (
-            <View key={`${selectedSymbol}-${timeframe}`} style={styles.frameCard}>
-              <View style={styles.frameHeader}>
-                <Text style={styles.frameTitle}>{formatTimeframeLabel(timeframe)}</Text>
-                <Text style={[styles.frameSource, sourceColor(frame?.source ?? "fallback")]}> 
-                  {frame?.source ?? "fallback"}
-                </Text>
-              </View>
-
-              <MiniChart candles={candles} />
-
-              <View style={styles.frameStats}>
-                <Text style={styles.statText}>Candles {candles.length}</Text>
-                <Text style={styles.statText}>Close {latest ? formatPrice(latest.c) : "-"}</Text>
-                <Text style={styles.statText}>Support {pattern ? formatPrice(pattern.support) : "-"}</Text>
-                <Text style={styles.statText}>Resistance {pattern ? formatPrice(pattern.resistance) : "-"}</Text>
-              </View>
-
-              <Text style={[styles.patternLine, { color: directionColor(pattern?.direction ?? "neutral") }]}>
-                {pattern ? `${pattern.pattern.toUpperCase()} | ${pattern.direction.toUpperCase()} | ${pattern.confidence}%` : "Pattern unavailable"}
-              </Text>
-              <Text style={styles.note}>{frame?.note ?? pattern?.note ?? "No note available"}</Text>
+        </ScrollView>
+        {loading ? <Text style={styles.muted}>Loading five-year daily candle history for all pairs...</Text> : null}
+        {error ? <Text style={styles.error}>{error}</Text> : null}
+        <View style={styles.header}><Text style={[styles.cell, styles.pattern]}>Candle stick pattern</Text><Text style={[styles.cell, styles.pair]}>Currency pair</Text><Text style={[styles.cell, styles.count]}>Occurred</Text><Text style={[styles.cell, styles.count]}>Successful</Text><Text style={[styles.cell, styles.count]}>Unsuccessful</Text><Text style={[styles.cell, styles.count]}>Neutral</Text><Text style={[styles.cell, styles.reason]}>Reason / volume</Text></View>
+        {rows.map((row) => {
+          const sample = row.summary.details[0];
+          const isSelected = detail?.row.pair === row.pair && detail.row.summary.pattern === row.summary.pattern;
+          return <View key={`${row.pair}-${row.summary.pattern}`}>
+            <View style={styles.row}>
+              <Pressable onPress={() => setDetail({ row, filter: "occurred" })} style={[styles.cell, styles.pattern]}><Text style={styles.patternText}>{labelPattern(row.summary.pattern)}</Text></Pressable><Text style={[styles.cell, styles.pair]}>{row.pair}</Text><Pressable onPress={() => setDetail({ row, filter: "occurred" })} style={[styles.cell, styles.count, styles.countButton]}><Text style={styles.countLink}>{row.summary.formations}</Text></Pressable><Pressable onPress={() => setDetail({ row, filter: "successful" })} style={[styles.cell, styles.count, styles.countButton]}><Text style={[styles.countLink, styles.success]}>{row.summary.expectedDirectionCount}</Text></Pressable><Pressable onPress={() => setDetail({ row, filter: "unsuccessful" })} style={[styles.cell, styles.count, styles.countButton]}><Text style={[styles.countLink, styles.failure]}>{row.summary.oppositeDirectionCount}</Text></Pressable><Pressable onPress={() => setDetail({ row, filter: "neutral" })} style={[styles.cell, styles.count, styles.countButton]}><Text style={[styles.countLink, styles.neutral]}>{row.summary.neutralOutcomeCount}</Text></Pressable><Pressable onPress={() => setDetail({ row, filter: "occurred" })} style={[styles.cell, styles.reason]}><Text numberOfLines={2} style={styles.reasonText}>{sample ? `${sample.note} ${volumeLabel(sample)}` : "-"}</Text></Pressable>
             </View>
-          );
+            {isSelected && detail ? <View style={styles.detail}><View style={styles.detailHead}><Text style={styles.detailTitle}>{detail.filter.toUpperCase()} | {detail.row.pair} | {labelPattern(detail.row.summary.pattern)}</Text><Pressable onPress={() => setDetail(null)}><Text style={styles.close}>Close</Text></Pressable></View><Text style={styles.detailMeta}>Occurred {detail.row.summary.formations} | Successful {detail.row.summary.expectedDirectionCount} | Unsuccessful {detail.row.summary.oppositeDirectionCount} | Neutral {detail.row.summary.neutralOutcomeCount} | Support {detail.row.summary.atSupportCount} | Resistance {detail.row.summary.atResistanceCount}</Text><ScrollView style={styles.detailList} nestedScrollEnabled>{detail.row.summary.details.filter((item) => detail.filter === "occurred" || item.outcome === detail.filter).map((item) => <View key={`${item.timestamp}-${item.outcome}`} style={styles.detailRow}><Text style={styles.detailDate}>{formatCandleSession(item.timestamp)} | {item.outcome.toUpperCase()}</Text><Text style={styles.detailText}>{item.note}</Text><Text style={styles.detailText}>At {item.formedAt}; expected {item.expectedDirection}; close {item.entryClose.toFixed(5)} to {item.followThroughClose.toFixed(5)}; {volumeLabel(item)}.</Text></View>)}</ScrollView></View> : null}
+          </View>;
         })}
+        {!loading && rows.length === 0 ? <Text style={styles.muted}>No daily patterns were found with five-year coverage.</Text> : null}
       </SectionCard>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  description: {
-    color: theme.colors.muted,
-    marginBottom: 10,
-    fontSize: 13,
-    lineHeight: 18
-  },
-  assetRow: {
-    flexDirection: "row",
-    flexWrap: "wrap",
-    gap: 8,
-    marginBottom: 10
-  },
-  assetChip: {
-    borderRadius: 999,
-    paddingVertical: 8,
-    paddingHorizontal: 12,
-    backgroundColor: "#123246",
-    borderWidth: 1,
-    borderColor: "#23546e"
-  },
-  assetChipActive: {
-    backgroundColor: theme.colors.accent,
-    borderColor: theme.colors.accent
-  },
-  assetChipText: {
-    color: theme.colors.text,
-    fontWeight: "700",
-    fontSize: 12
-  },
-  assetChipTextActive: {
-    color: "#03222f"
-  },
-  symbolRow: {
-    flexDirection: "row",
-    flexWrap: "wrap",
-    gap: 8,
-    marginBottom: 12
-  },
-  symbolChip: {
-    borderRadius: 999,
-    paddingVertical: 7,
-    paddingHorizontal: 10,
-    backgroundColor: "#102b3b",
-    borderWidth: 1,
-    borderColor: "#1f4358"
-  },
-  symbolChipActive: {
-    backgroundColor: "#163f57",
-    borderColor: theme.colors.accent
-  },
-  symbolChipText: {
-    color: theme.colors.text,
-    fontWeight: "700",
-    fontSize: 12
-  },
-  symbolChipTextActive: {
-    color: theme.colors.accent
-  },
-  source: {
-    fontSize: 12,
-    fontWeight: "700",
-    marginBottom: 10
-  },
-  patternSummary: {
-    gap: 8,
-    marginBottom: 12
-  },
-  patternBadge: {
-    backgroundColor: "#102b3b",
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: "#1f4358",
-    padding: 10
-  },
-  patternBadgeTitle: {
-    fontWeight: "800",
-    fontSize: 13
-  },
-  patternBadgeText: {
-    color: theme.colors.muted,
-    marginTop: 3,
-    fontSize: 12,
-    fontWeight: "700"
-  },
-  frameCard: {
-    backgroundColor: "#0f2533",
-    borderRadius: 14,
-    padding: 12,
-    marginTop: 10,
-    borderWidth: 1,
-    borderColor: "#1f4358"
-  },
-  frameHeader: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-    marginBottom: 8
-  },
-  frameTitle: {
-    color: theme.colors.text,
-    fontWeight: "800"
-  },
-  frameSource: {
-    fontWeight: "700",
-    fontSize: 11,
-    textTransform: "uppercase"
-  },
-  chartWrap: {
-    flexDirection: "row",
-    alignItems: "flex-end",
-    gap: 3,
-    height: 72,
-    paddingVertical: 4,
-    marginBottom: 10
-  },
-  sparkBar: {
-    flex: 1,
-    minWidth: 3,
-    borderRadius: 999,
-    backgroundColor: theme.colors.accent,
-    opacity: 0.88
-  },
-  chartFallback: {
-    color: theme.colors.muted,
-    fontSize: 12,
-    marginBottom: 10
-  },
-  frameStats: {
-    flexDirection: "row",
-    flexWrap: "wrap",
-    gap: 8,
-    marginBottom: 8
-  },
-  statText: {
-    color: theme.colors.muted,
-    fontSize: 12,
-    fontWeight: "700"
-  },
-  patternLine: {
-    fontWeight: "800",
-    fontSize: 12,
-    marginBottom: 4
-  },
-  note: {
-    color: theme.colors.text,
-    fontSize: 12,
-    lineHeight: 16
-  },
-  muted: {
-    color: theme.colors.muted,
-    marginBottom: 8
-  },
-  error: {
-    color: theme.colors.negative,
-    marginBottom: 8
-  }
+  intro: { color: theme.colors.muted, fontSize: 12, lineHeight: 17 },
+  filters: { marginVertical: 12 }, filterRow: { flexDirection: "row", gap: 6 }, filter: { paddingVertical: 6, paddingHorizontal: 9, backgroundColor: "#102b3b", borderWidth: 1, borderColor: "#23546e", borderRadius: 5 }, filterActive: { backgroundColor: "#1d6977", borderColor: theme.colors.accent }, filterText: { color: theme.colors.text, fontSize: 11, fontWeight: "700" },
+  header: { flexDirection: "row", backgroundColor: "#163f57", borderWidth: 1, borderColor: "#23546e", paddingVertical: 8 }, row: { flexDirection: "row", borderLeftWidth: 1, borderRightWidth: 1, borderBottomWidth: 1, borderColor: "#23546e", paddingVertical: 9 }, cell: { color: theme.colors.text, fontSize: 10, paddingHorizontal: 4 }, pattern: { flex: 1.45, minWidth: 108 }, pair: { flex: 0.85, minWidth: 62 }, count: { flex: 0.62, minWidth: 48, textAlign: "center" }, countButton: { minHeight: 28, justifyContent: "center", backgroundColor: "#123246", borderRadius: 3, marginHorizontal: 1 }, reason: { flex: 2.25, minWidth: 160 }, patternText: { color: theme.colors.text, fontSize: 10 }, reasonText: { color: theme.colors.muted, fontSize: 10 }, countLink: { color: theme.colors.accent, fontSize: 12, fontWeight: "800", textAlign: "center", textDecorationLine: "underline" }, success: { color: theme.colors.positive }, failure: { color: theme.colors.negative }, neutral: { color: theme.colors.warning },
+  detail: { marginTop: 12, padding: 10, backgroundColor: "#102b3b", borderWidth: 1, borderColor: "#2d7a8b" }, detailHead: { flexDirection: "row", justifyContent: "space-between" }, detailTitle: { color: theme.colors.text, fontSize: 13, fontWeight: "800" }, close: { color: theme.colors.accent, fontSize: 12, fontWeight: "700" }, detailMeta: { color: theme.colors.muted, fontSize: 11, marginTop: 6 }, detailList: { maxHeight: 310 }, detailRow: { borderTopWidth: 1, borderTopColor: "#23546e", marginTop: 8, paddingTop: 8 }, detailDate: { color: theme.colors.text, fontSize: 11, fontWeight: "800" }, detailText: { color: theme.colors.muted, fontSize: 11, lineHeight: 16, marginTop: 2 },
+  muted: { color: theme.colors.muted, marginVertical: 8 }, error: { color: theme.colors.negative, marginVertical: 8 }
 });

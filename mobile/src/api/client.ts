@@ -24,7 +24,9 @@ const TAB_LEADER_STALE_MS = 90_000;
 const TAB_LEADER_KEY = "market-analysis:poll-leader";
 const SHARED_CACHE_PREFIX = "market-analysis:cache:";
 const baseUrlCooldownUntil = new Map<string, number>();
+const pathCooldownUntil = new Map<string, number>();
 const jsonResponseCache = new Map<string, unknown>();
+const inFlightRequests = new Map<string, Promise<Response>>();
 let apiNotice: string | null = null;
 
 const TAB_ID = (() => {
@@ -49,6 +51,10 @@ function canUseBrowserStorage() {
 
 function sharedStorageCacheKey(path: string, baseUrl: string) {
   return `${SHARED_CACHE_PREFIX}${cacheKeyFor(path, baseUrl)}`;
+}
+
+function historyCachePath(symbols: string[], timeframes: MarketHistoryTimeframe[], years: number) {
+  return `/api/market/history/v2?symbols=${encodeURIComponent(symbols.join(","))}&timeframes=${encodeURIComponent(timeframes.join(","))}&years=${years}`;
 }
 
 function readSharedCache<T>(path: string, baseUrl: string, maxAgeMs = SHARED_CACHE_MAX_AGE_MS): T | null {
@@ -194,43 +200,65 @@ async function fetchWithTimeout(input: string, init?: RequestInit, timeoutMs = 2
   }
 }
 
-async function requestWithFallback(path: string, init?: RequestInit) {
-  let lastError: unknown = null;
-  const now = Date.now();
+async function requestWithFallback(path: string, init?: RequestInit, bypassTabLeader = false, timeoutMs = 20_000) {
+  const requestKey = JSON.stringify({
+    path,
+    method: init?.method ?? "GET",
+    body: typeof init?.body === "string" ? init.body.slice(0, 256) : undefined
+  });
 
-  if (!shouldCurrentTabFetch()) {
-    throw new Error("Follower tab using shared cache");
+  const existingRequest = inFlightRequests.get(requestKey);
+  if (existingRequest) {
+    return existingRequest;
   }
 
-  for (const baseUrl of getReachableBaseUrls()) {
-    const cooldownUntil = baseUrlCooldownUntil.get(baseUrl) ?? 0;
-    if (cooldownUntil > now) {
-      lastError = new Error("Request failed: 429");
-      continue;
+  const fetchPromise = (async () => {
+    let lastError: unknown = null;
+    const now = Date.now();
+
+    if (!bypassTabLeader && !shouldCurrentTabFetch()) {
+      throw new Error("Follower tab using shared cache");
     }
 
-    try {
-      const response = await fetchWithTimeout(withBase(path, baseUrl), init);
-      if (response.status === 429) {
-        baseUrlCooldownUntil.set(baseUrl, Date.now() + RATE_LIMIT_COOLDOWN_MS);
+    for (const baseUrl of getReachableBaseUrls()) {
+      const cooldownUntil = baseUrlCooldownUntil.get(baseUrl) ?? 0;
+      if (cooldownUntil > now) {
+        lastError = new Error("Request failed: 429");
+        continue;
       }
 
-      if (!response.ok) {
-        throw new Error(`Request failed: ${response.status}`);
-      }
-      return response;
-    } catch (error) {
-      const message = normalizeErrorMessage(error);
-      if (isTimeoutMessage(message)) {
-        baseUrlCooldownUntil.set(baseUrl, Date.now() + TIMEOUT_COOLDOWN_MS);
-      }
+      try {
+        const response = await fetchWithTimeout(withBase(path, baseUrl), init, timeoutMs);
+        if (response.status === 429) {
+          baseUrlCooldownUntil.set(baseUrl, Date.now() + RATE_LIMIT_COOLDOWN_MS);
+          pathCooldownUntil.set(path, Date.now() + RATE_LIMIT_COOLDOWN_MS);
+        }
 
-      lastError = new Error(message);
+        if (!response.ok) {
+          throw new Error(`Request failed: ${response.status}`);
+        }
+        return response;
+      } catch (error) {
+        const message = normalizeErrorMessage(error);
+        if (isTimeoutMessage(message)) {
+          baseUrlCooldownUntil.set(baseUrl, Date.now() + TIMEOUT_COOLDOWN_MS);
+        }
+
+        lastError = new Error(message);
+      }
     }
+
+    const message = lastError instanceof Error ? lastError.message : "Unable to reach API";
+    throw new Error(message);
+  })();
+
+  inFlightRequests.set(requestKey, fetchPromise);
+
+  try {
+    return await fetchPromise;
+  } finally {
+    inFlightRequests.delete(requestKey);
   }
-
-  const message = lastError instanceof Error ? lastError.message : "Unable to reach API";
-  throw new Error(message);
 }
 
 const fallbackNews: NewsFeedResponse = {
@@ -533,7 +561,7 @@ const fallbackNotifierStatus: NotifierStatus = {
   lastError: "Notifier requires deployed HTTPS API backend"
 };
 
-async function getJson<T>(path: string): Promise<T> {
+async function getJson<T>(path: string, options?: { timeoutMs?: number; bypassTabLeader?: boolean; allowCache?: boolean }): Promise<T> {
   const method = "GET";
   const baseCandidates = getReachableBaseUrls();
   const cacheCandidates = baseCandidates.map((baseUrl) => cacheKeyFor(path, baseUrl));
@@ -545,7 +573,7 @@ async function getJson<T>(path: string): Promise<T> {
         "Cache-Control": "no-cache, no-store, max-age=0",
         Pragma: "no-cache"
       }
-    });
+    }, options?.bypassTabLeader, options?.timeoutMs);
     if (!response.ok) {
       throw new Error(`Request failed: ${response.status}`);
     }
@@ -562,7 +590,7 @@ async function getJson<T>(path: string): Promise<T> {
     return payload;
   } catch (error) {
     const message = normalizeErrorMessage(error);
-    const useCache = isRateLimitMessage(message) || isTimeoutMessage(message) || /Follower tab using shared cache/i.test(message);
+    const useCache = options?.allowCache !== false && (isRateLimitMessage(message) || isTimeoutMessage(message) || /Follower tab using shared cache/i.test(message));
 
     if (useCache) {
       const notice = null;
@@ -652,6 +680,8 @@ export async function fetchForexCandles(pairs: string[], timeframe: ForexTimefra
 }
 
 export async function fetchMarketHistory(symbols: string[], timeframes: MarketHistoryTimeframe[], years = 5) {
+  const cachePath = historyCachePath(symbols, timeframes, years);
+  const baseCandidates = getReachableBaseUrls();
   try {
     const response = await requestWithFallback("/api/market/history", {
       method: "POST",
@@ -662,17 +692,40 @@ export async function fetchMarketHistory(symbols: string[], timeframes: MarketHi
         Pragma: "no-cache"
       },
       body: JSON.stringify({ symbols, timeframes, years })
-    });
+    }, true, 90_000);
 
-    return (await response.json()) as MarketHistoryResponse;
+    const payload = (await response.json()) as MarketHistoryResponse;
+    for (const baseUrl of baseCandidates) {
+      jsonResponseCache.set(cacheKeyFor(cachePath, baseUrl), payload);
+      writeSharedCache(cachePath, baseUrl, payload);
+    }
+    return payload;
   } catch (error) {
-    throw new Error(error instanceof Error ? error.message : "Failed to load market history");
+    const message = normalizeErrorMessage(error);
+    if (/Follower tab using shared cache/i.test(message)) {
+      for (const baseUrl of baseCandidates) {
+        const cached = jsonResponseCache.get(cacheKeyFor(cachePath, baseUrl));
+        if (cached) {
+          return cached as MarketHistoryResponse;
+        }
+        const shared = readSharedCache<MarketHistoryResponse>(cachePath, baseUrl, STALE_SHARED_CACHE_MAX_AGE_MS);
+        if (shared) {
+          return shared;
+        }
+      }
+      throw new Error("History is loading in another tab. Please retry in a moment.");
+    }
+    throw new Error(message || "Failed to load market history");
   }
 }
 
 export async function fetchMarketAgents() {
   try {
-    return await getJson<MarketAgentsResponse>("/api/market/agents");
+    return await getJson<MarketAgentsResponse>("/api/market/agents?validation=v1", {
+      timeoutMs: 90_000,
+      bypassTabLeader: true,
+      allowCache: false
+    });
   } catch (error) {
     throw new Error(error instanceof Error ? error.message : "Failed to load market agents");
   }

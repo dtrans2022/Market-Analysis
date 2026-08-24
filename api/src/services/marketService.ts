@@ -32,6 +32,14 @@ export type ForexCandlesResponse = {
   years: number;
 };
 
+export type LiveForexQuote = {
+  symbol: string;
+  bid: number;
+  ask: number;
+  spread: number;
+  timestamp: string;
+};
+
 export type MarketTrend = {
   symbol: string;
   name: string;
@@ -205,6 +213,66 @@ export async function getLiveForexSpotPrice(pair: string): Promise<number | null
   }
 
   return null;
+}
+
+async function getExchangeRateFallback(pairs: string[]) {
+  const bases = Array.from(new Set(pairs.map((pair) => pair.split("/")[0])));
+  const rates = new Map<string, number>();
+
+  await Promise.all(bases.map(async (base) => {
+    try {
+      const response = await fetch(`https://open.er-api.com/v6/latest/${encodeURIComponent(base)}`);
+      if (!response.ok) {
+        return;
+      }
+
+      const payload = await response.json() as { rates?: Record<string, unknown> };
+      for (const pair of pairs.filter((item) => item.startsWith(`${base}/`))) {
+        const quote = pair.split("/")[1];
+        const value = Number(payload.rates?.[quote]);
+        if (Number.isFinite(value) && value > 0) {
+          rates.set(pair, value);
+        }
+      }
+    } catch {
+      // Try the next provider or pair.
+    }
+  }));
+
+  return rates;
+}
+
+export async function getLiveForexQuoteFeed(pairs: string[]) {
+  const supportedPairs = Array.from(new Set(pairs)).filter((pair) => Boolean(FOREX_SYMBOLS[pair]));
+  const timestamp = new Date().toISOString();
+  const quotes: LiveForexQuote[] = [];
+
+  const yahooPrices = await Promise.all(supportedPairs.map(async (pair) => [pair, await getLiveForexSpotPrice(pair)] as const));
+  const exchangeRatePrices = await getExchangeRateFallback(
+    yahooPrices.filter(([, price]) => price == null).map(([pair]) => pair)
+  );
+
+  for (const [pair, yahooPrice] of yahooPrices) {
+    const price = yahooPrice ?? exchangeRatePrices.get(pair);
+    if (typeof price !== "number" || !Number.isFinite(price) || price <= 0) {
+      continue;
+    }
+
+    const spread = price * 0.00015;
+    quotes.push({
+      symbol: pair,
+      bid: price - spread / 2,
+      ask: price + spread / 2,
+      spread,
+      timestamp
+    });
+  }
+
+  return {
+    quotes,
+    provider: quotes.some((quote) => yahooPrices.find(([pair]) => pair === quote.symbol)?.[1] != null) ? "Yahoo Finance + ExchangeRate-API" : "ExchangeRate-API",
+    timestamp
+  };
 }
 
 function timeframePlan(timeframe: ForexTimeframe): { resolution: string; bucket: number } {

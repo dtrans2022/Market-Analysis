@@ -5,4 +5,5 @@ dist/
 .expo-shared/
 *.log
 coverage/
+lambda-live-api.zip
 .DS_Store

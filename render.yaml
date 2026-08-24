@@ -1,0 +1,40 @@
+services:
+  - type: web
+    name: market-analysis-api
+    runtime: node
+    rootDir: api
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: NODE_VERSION
+        value: 20
+      - key: ALLOWED_ORIGIN
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: MT4_SNAPSHOT_API_KEY
+        sync: false
+      - key: FINNHUB_API_KEY
+        sync: false
+      - key: MARKETAUX_API_KEY
+        sync: false
+      - key: ALPHA_VANTAGE_API_KEY
+        sync: false
+      - key: SLACK_WEBHOOK_URL
+        sync: false
+      - key: SLACK_WEBHOOK_URLS
+        sync: false
+      - key: SLACK_NOTIFY_USER_IDS
+        sync: false
+      - key: AUTO_NEWS_TO_SLACK_ENABLED
+        value: "true"
+      - key: STRICT_LIVE_MODE
+        value: "false"
+      - key: NEWS_POLL_INTERVAL_MS
+        value: "60000"
+      - key: SUPABASE_MT5_SNAPSHOT_TABLE
+        value: mt5_snapshots

@@ -24,8 +24,8 @@ export function SettingsScreen() {
   const [status, setStatus] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
   const notifier = usePollingData(fetchNotifierStatus, REFRESH_INTERVAL_MS);
-  const mt4Quotes = usePollingData(fetchMt4Quotes, REFRESH_INTERVAL_MS);
-  const mt4Snapshot = usePollingData(fetchMt4Snapshot, REFRESH_INTERVAL_MS);
+  const mt4Quotes = usePollingData(fetchMt4Quotes, 60_000);
+  const mt4Snapshot = usePollingData(fetchMt4Snapshot, 60_000);
   const syncNotice = notifier.notice ?? mt4Snapshot.notice;
   const syncHealthy = !syncNotice;
   const syncStatusLabel = syncHealthy ? "Live data synced" : "Live data delayed, using cached data";
@@ -66,6 +66,9 @@ export function SettingsScreen() {
           <>
             <Text style={[styles.healthBadge, { color: getHealthColor(mt4Quotes.data.healthStatus) }]}>
               Feed Health: {mt4Quotes.data.healthStatus.toUpperCase()}
+            </Text>
+            <Text style={styles.healthNote}>
+              Source: {mt4Quotes.data.source === "api-fallback" ? `Live API fallback${mt4Quotes.data.provider ? ` (${mt4Quotes.data.provider})` : ""}` : "MT5 bridge"}
             </Text>
             <Text style={styles.healthNote}>{mt4Quotes.data.healthNote}</Text>
             <Text style={styles.statusLine}>Heartbeat: {mt4Quotes.data.heartbeat ?? "-"}</Text>

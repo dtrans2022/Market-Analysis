@@ -54,6 +54,19 @@ Slack payload example:
 
 ## Setup
 
+### Persistent hosting with Render and Supabase
+
+Render runs the API as a persistent web service while Supabase stores the latest MT5 snapshot across deploys and restarts.
+
+1. Create a Supabase project and run [supabase/schema.sql](supabase/schema.sql) in the SQL Editor.
+2. In Render, create a Blueprint from this repository. It will use [render.yaml](render.yaml) to create the API service.
+3. Set `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` in Render. Use the server-only service-role key; never put it in the mobile app or web bundle.
+4. Set `ALLOWED_ORIGIN` to the deployed web origin, for example `https://<account>.github.io` or the exact GitHub Pages project URL.
+5. Set `MT4_SNAPSHOT_API_KEY` to a strong value and configure the MT5 EA with the same value.
+6. Point the web app at the Render URL by setting `EXPO_PUBLIC_API_BASE_URL` during `mobile` web export, then run `npm run deploy:gh-pages` from `mobile`.
+
+The API keeps fresh MT5 quotes as the primary feed. When the broker snapshot is stale or unavailable, `/api/mt4/quotes` serves live quotes from Yahoo Finance and ExchangeRate-API. Supabase persistence restores the most recent broker snapshot after a Render restart; it is not a replacement for the MT5 EA connection.
+
 ### 1. Install dependencies
 
 ```powershell
