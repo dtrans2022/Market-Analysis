@@ -1,0 +1,9 @@
+node_modules/
+dist/
+.env
+.expo/
+.expo-shared/
+*.log
+coverage/
+lambda-live-api.zip
+.DS_Store
