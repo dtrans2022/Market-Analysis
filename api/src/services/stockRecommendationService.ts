@@ -406,25 +406,38 @@ async function getFmpSuggestions(): Promise<StockSuggestion[] | null> {
   }
 
   try {
-    const url = new URL("https://financialmodelingprep.com/api/v3/stock_market/gainers");
-    url.searchParams.set("apikey", config.FMP_API_KEY);
-    const response = await fetch(url);
-    if (!response.ok) {
-      return null;
-    }
-
-    const payload = await response.json() as Array<{
+    const endpoints = [
+      "https://financialmodelingprep.com/api/v3/stock_market/gainers",
+      "https://financialmodelingprep.com/stable/biggest-gainers"
+    ];
+    let payload: Array<{
       symbol?: string;
       name?: string;
       price?: number;
       changesPercentage?: number;
       change?: number;
-    }>;
+    }> = [];
+
+    for (const endpoint of endpoints) {
+      const url = new URL(endpoint);
+      url.searchParams.set("apikey", config.FMP_API_KEY);
+      const response = await fetch(url);
+      if (!response.ok) {
+        continue;
+      }
+
+      const candidate = await response.json();
+      if (Array.isArray(candidate)) {
+        payload = candidate;
+        break;
+      }
+    }
+
     const suggestions = payload
-      .filter((item) => typeof item.symbol === "string" && Number.isFinite(Number(item.price)))
+      .filter((item) => typeof item.symbol === "string" && Number.isFinite(Number(item.price)) && Number.isFinite(Number(item.changesPercentage)))
       .slice(0, TOP_SHARES_COUNT)
       .map((item) => {
-        const changePercent = Number(item.changesPercentage ?? 0);
+        const changePercent = Number(item.changesPercentage);
         const momentum = scoreMomentum(changePercent);
         return {
           symbol: item.symbol!,
