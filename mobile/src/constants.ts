@@ -23,7 +23,7 @@ function defaultApiBaseUrl() {
 		}
 
 		// Hosted web deployments should call the deployed HTTPS API by default.
-		return readExpoEnv("EXPO_PUBLIC_PROD_API_BASE_URL") ?? "https://qhpokqaxb234i7pk7ubxjmywkq0nugeq.lambda-url.ap-southeast-2.on.aws";
+		return readExpoEnv("EXPO_PUBLIC_PROD_API_BASE_URL") ?? "https://market-analysis-hxan.onrender.com";
 	}
 
 	if (Platform.OS === "android") {
@@ -41,7 +41,7 @@ export const API_BASE_URL_CANDIDATES = Array.from(
 			readExpoEnv("EXPO_PUBLIC_API_BASE_URL"),
 			readExpoEnv("EXPO_PUBLIC_PROD_API_BASE_URL"),
 			defaultApiBaseUrl(),
-			"https://qhpokqaxb234i7pk7ubxjmywkq0nugeq.lambda-url.ap-southeast-2.on.aws",
+			"https://market-analysis-hxan.onrender.com",
 			"",
 			"http://localhost:8080",
 			"http://10.0.2.2:8080"
