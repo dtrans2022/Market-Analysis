@@ -484,6 +484,9 @@ function AgentCard({
       <Text style={styles.description}>{agent.summary}</Text>
       <Text style={styles.description}>{agent.strategySummary}</Text>
       <Text style={styles.description}>Setup quality {agent.deepDive.setupQuality.toUpperCase()} | Confluence {agent.deepDive.confluenceScore}</Text>
+      <Text style={styles.freshnessNotice}>
+        {agent.bestSignal.source === "live" ? "Live market history" : "Derived market history"} | Last candle {formatTimestamp(agent.bestSignal.lastOccurrenceAt)} | Quote {formatPrice(agent.bestSignal.currentPrice)}
+      </Text>
 
       <View style={styles.kpiRow}>
         <Text style={styles.kpi}>Support {formatPrice(agent.bestSignal.support)}</Text>
@@ -1245,6 +1248,12 @@ const styles = StyleSheet.create({
     marginTop: 6,
     fontSize: 12,
     lineHeight: 17
+  },
+  freshnessNotice: {
+    color: theme.colors.warning,
+    marginTop: 8,
+    fontSize: 12,
+    fontWeight: "700"
   },
   kpiRow: {
     flexDirection: "row",
