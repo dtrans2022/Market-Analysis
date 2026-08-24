@@ -22,6 +22,7 @@ const schema = z.object({
   STRICT_LIVE_MODE: z
     .string()
     .optional()
+    .default("false")
     .transform((value) => value !== "false"),
   NEWS_POLL_INTERVAL_MS: z.coerce.number().default(60_000),
   ALLOWED_ORIGIN: z.string().default("*")
