@@ -131,9 +131,22 @@ export type MarketAgentReport = {
 
 export type MarketAgentsResponse = {
   data: MarketAgentReport[];
+  forexValidation: ForexValidationItem[];
   source: "live" | "derived" | "mixed" | "fallback";
   reason?: string;
   generatedAt: string;
+};
+
+export type ForexValidationItem = {
+  symbol: string;
+  timeframe: MarketAgentAnalysisTimeframe;
+  status: "BUY" | "SELL" | "NO TRADE";
+  pattern: CandlestickPattern;
+  direction: "up" | "down" | "neutral";
+  checks: Array<{ name: string; passed: boolean }>;
+  support: number;
+  resistance: number;
+  currentPrice: number;
 };
 
 export type ForexTradeMonitoringStatus = "tp-hit" | "sl-hit" | "open";
@@ -1119,6 +1132,7 @@ function resolveLiveSpotPriceFromMt4(symbol: string, quotesBySymbol: Map<string,
 
 async function buildMarketAgentsAnalysis(): Promise<MarketAgentsResponse> {
   const reports: MarketAgentReport[] = [];
+  const forexValidation: ForexValidationItem[] = [];
   const sources = new Set<HistorySource>();
   const generatedAt = new Date().toISOString();
   const calibrationStatsByTimeframe = buildCalibrationStatsByTimeframe();
@@ -1160,6 +1174,24 @@ async function buildMarketAgentsAnalysis(): Promise<MarketAgentsResponse> {
           const signal = buildSignal(symbol, config.category, timeframe, pattern, frame.candles, frame.source, liveSpotPrice, calibrationStatsByTimeframe);
           if (signal) {
             sources.add(frame.source);
+            if (config.category === "forex") {
+              const directional = signal.direction !== "neutral";
+              forexValidation.push({
+                symbol,
+                timeframe,
+                status: directional && signal.confidence >= 60 ? signal.direction === "up" ? "BUY" : "SELL" : "NO TRADE",
+                pattern: signal.candlestickPattern ?? "none",
+                direction: signal.direction,
+                checks: [
+                  { name: "Directional signal", passed: directional },
+                  { name: "Confidence threshold", passed: signal.confidence >= 60 },
+                  { name: "Trade plan available", passed: Number.isFinite(signal.tradePlan.entry) && Number.isFinite(signal.tradePlan.stopLoss) && Number.isFinite(signal.tradePlan.takeProfit) }
+                ],
+                support: signal.support,
+                resistance: signal.resistance,
+                currentPrice: signal.currentPrice
+              });
+            }
           }
           return signal;
         })
@@ -1233,6 +1265,7 @@ async function buildMarketAgentsAnalysis(): Promise<MarketAgentsResponse> {
 
   return {
     data: reports,
+    forexValidation,
     source,
     reason: "Three analysis agents built from live/derived price history with technical indicators, macro drivers, strategy plans, and graph placeholders.",
     generatedAt
