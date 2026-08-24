@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Linking, Modal, Pressable, StyleSheet, Text, View } from "react-native";
-import { fetchForexCandles, fetchGlobalNews, fetchMarketTrends } from "../api/client";
+import { fetchForexCandles, fetchGlobalNews, fetchMarketAgents, fetchMarketTrends } from "../api/client";
 import { REFRESH_INTERVAL_MS } from "../constants";
 import { usePollingData } from "../hooks/usePollingData";
 import { theme } from "../theme";
@@ -1012,6 +1012,7 @@ export function GlobalUpdatesScreen() {
   const [openForexForNewsId, setOpenForexForNewsId] = useState<string | null>(null);
   const { data, loading, error, lastUpdated } = usePollingData(fetchGlobalNews, REFRESH_INTERVAL_MS);
   const { data: trendsPayload } = usePollingData(fetchMarketTrends, REFRESH_INTERVAL_MS);
+  const { data: agentsPayload } = usePollingData(fetchMarketAgents, 5 * 60_000, "market-agents");
   const [newItemsCount, setNewItemsCount] = useState(0);
   const [lastSuccessAt, setLastSuccessAt] = useState<Date | null>(null);
   const [lastChangeAt, setLastChangeAt] = useState<Date | null>(null);
@@ -1023,6 +1024,14 @@ export function GlobalUpdatesScreen() {
     });
     return map;
   }, [trendsPayload]);
+  const validatedForexBySymbol = useMemo(() => {
+    const map = new Map<string, "up" | "down" | "neutral">();
+    const forex = agentsPayload?.data.find((agent) => agent.agent === "Forex");
+    for (const symbol of forex?.symbols ?? []) {
+      map.set(symbol.symbol, symbol.bestSignal.direction);
+    }
+    return map;
+  }, [agentsPayload]);
 
   useEffect(() => {
     if (!data || !lastUpdated) {
@@ -1089,7 +1098,16 @@ export function GlobalUpdatesScreen() {
               const oilImpact = impacts.find((impact) => impact.asset === "oil") ?? null;
               const sharesImpact = impacts.find((impact) => impact.asset === "shares") ?? null;
 
-              const forexPairs = unique([...(forexImpact.pairsUp ?? []), ...(forexImpact.pairsDown ?? [])]).slice(0, 6);
+              const validatedPairsUp = Array.from(validatedForexBySymbol.entries())
+                .filter(([, direction]) => direction === "up")
+                .map(([symbol]) => symbol);
+              const validatedPairsDown = Array.from(validatedForexBySymbol.entries())
+                .filter(([, direction]) => direction === "down")
+                .map(([symbol]) => symbol);
+              const displayForexImpact = validatedForexBySymbol.size > 0
+                ? { ...forexImpact, pairsUp: validatedPairsUp, pairsDown: validatedPairsDown }
+                : forexImpact;
+              const forexPairs = unique([...(displayForexImpact.pairsUp ?? []), ...(displayForexImpact.pairsDown ?? [])]).slice(0, 6);
               const commoditySymbols = unique([
                 ...(commoditiesImpact?.symbolsUp ?? []),
                 ...(commoditiesImpact?.symbolsDown ?? [])
@@ -1131,7 +1149,7 @@ export function GlobalUpdatesScreen() {
                   <View style={styles.focusBox}>
                     <Text style={styles.focusTitle}>Focus direction</Text>
                     <Text style={styles.focusText}>
-                      FOREX: {forexImpact.direction} - {focusHint("forex", forexImpact.direction)}
+                      FOREX: {displayForexImpact.direction} - {focusHint("forex", displayForexImpact.direction)}
                     </Text>
                     <Text style={styles.focusText}>
                       COMMODITIES: {(commoditiesImpact?.direction ?? "Neutral")} - {focusHint("commodities", commoditiesImpact?.direction ?? "Neutral")}
@@ -1150,11 +1168,11 @@ export function GlobalUpdatesScreen() {
                     <Text style={styles.orderSubTitle}>Forex pairs</Text>
                     {forexPairs.length === 0 ? <Text style={styles.orderMuted}>No forex pair setup available.</Text> : null}
                     {forexPairs.map((pair) => {
-                      const direction: NewsImpact["direction"] = (forexImpact.pairsUp ?? []).includes(pair)
+                      const direction: NewsImpact["direction"] = (displayForexImpact.pairsUp ?? []).includes(pair)
                         ? "Up"
-                        : (forexImpact.pairsDown ?? []).includes(pair)
+                        : (displayForexImpact.pairsDown ?? []).includes(pair)
                           ? "Down"
-                          : forexImpact.direction;
+                          : displayForexImpact.direction;
                       const entry = resolvePrice(pair, trendBySymbol);
                       const levels = orderLevels(entry, direction, 0.0075, 0.0035);
                       return (
@@ -1202,10 +1220,10 @@ export function GlobalUpdatesScreen() {
                   <View key={`${item.id}-forex-breakdown`} style={styles.fxBox}>
                     <Text style={styles.fxTitle}>Forex pair direction</Text>
                     <Text style={styles.fxText}>
-                      Up: {forexImpact.pairsUp && forexImpact.pairsUp.length > 0 ? forexImpact.pairsUp.join(", ") : "-"}
+                      Up: {displayForexImpact.pairsUp && displayForexImpact.pairsUp.length > 0 ? displayForexImpact.pairsUp.join(", ") : "-"}
                     </Text>
                     <Text style={styles.fxText}>
-                      Down: {forexImpact.pairsDown && forexImpact.pairsDown.length > 0 ? forexImpact.pairsDown.join(", ") : "-"}
+                      Down: {displayForexImpact.pairsDown && displayForexImpact.pairsDown.length > 0 ? displayForexImpact.pairsDown.join(", ") : "-"}
                     </Text>
                     <Text style={styles.fxHint}>Tap FOREX chip to view graph, range, MA and MACD tools.</Text>
                     {openForexForNewsId === item.id ? <ForexTechnicalPanel forexImpact={forexImpact} /> : null}
