@@ -733,8 +733,8 @@ function AgentCard({
               <Text style={styles.symbolPrice}>{formatPrice(symbol.currentPrice)}</Text>
             </View>
             <Text style={styles.symbolMeta}>Best timeframe {symbol.bestSignal.timeframe}</Text>
-            <Text style={[styles.symbolMeta, { color: confidenceMeta.color }]}>
-              {symbol.bestSignal.pattern.toUpperCase()} | {symbol.bestSignal.direction.toUpperCase()} | {confidenceMeta.text} | {confidenceMeta.toneLabel}
+            <Text style={styles.symbolMeta}>
+              {symbol.bestSignal.pattern.toUpperCase()} | <Text style={{ color: directionColor(symbol.bestSignal.direction) }}>{symbol.bestSignal.direction.toUpperCase()}</Text> | <Text style={{ color: confidenceMeta.color }}>{confidenceMeta.text} | {confidenceMeta.toneLabel}</Text>
             </Text>
             <Text style={styles.symbolMeta}>Occurred {formatTimestamp(symbol.bestSignal.lastOccurrenceAt)}</Text>
             <Text style={styles.symbolMeta}>
@@ -813,7 +813,7 @@ function ForexValidationPanel({ items }: { items: ForexValidationItem[] }) {
             <Text style={styles.validationTitle}>{item.symbol} | {item.timeframe}</Text>
             <Text style={[styles.validationStatus, { color: item.status === "BUY" ? theme.colors.positive : item.status === "SELL" ? theme.colors.negative : theme.colors.warning }]}>{item.status}</Text>
           </View>
-          <Text style={styles.validationMeta}>{formatCandlestickPattern(item.pattern)} | {item.direction.toUpperCase()} | Price {formatPrice(item.currentPrice)} | S {formatPrice(item.support)} R {formatPrice(item.resistance)}</Text>
+          <Text style={styles.validationMeta}>{formatCandlestickPattern(item.pattern)} | <Text style={{ color: directionColor(item.direction) }}>{item.direction.toUpperCase()}</Text> | Price {formatPrice(item.currentPrice)} | S {formatPrice(item.support)} R {formatPrice(item.resistance)}</Text>
           <Text style={styles.validationChecks}>{item.checks.map((check) => `${check.passed ? "PASS" : "FAIL"}: ${check.name}`).join(" | ")}</Text>
         </View>
       ))}
