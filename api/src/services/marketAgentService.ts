@@ -1,4 +1,5 @@
 import { getLiveForexSpotPrice } from "./marketService.js";
+import { config } from "../config.js";
 import { getLatestMt4Snapshot } from "./mt4Service.js";
 import { getMarketHistory, type HistoryTimeframe, type MarketAssetCategory, type MarketPatternSignal, type HistorySource, type CandlestickPattern } from "./marketHistoryService.js";
 
@@ -39,6 +40,7 @@ export type MarketAgentTechnicalAnalysis = {
 };
 
 export type MarketAgentFundamentalAnalysis = {
+  source?: "fmp" | "proxy";
   bias: "bullish" | "bearish" | "neutral";
   macroScore: number;
   summary: string;
@@ -46,6 +48,12 @@ export type MarketAgentFundamentalAnalysis = {
   risks: string[];
   catalystWindow: string;
 };
+
+type CommodityFundamentalContext = {
+  dollarChangePercent: number;
+  yieldChangePercent: number;
+  source: "fmp";
+} | null;
 
 export type MarketAgentDeepDiveDimension = {
   skillDimensions: string[];
@@ -826,7 +834,34 @@ export function buildTechnicalAnalysis(symbol: string, timeframe: MarketAgentAna
   };
 }
 
-function buildFundamentalAnalysis(category: MarketAssetCategory, symbol: string, direction: "up" | "down" | "neutral"): MarketAgentFundamentalAnalysis {
+async function fetchCommodityFundamentalContext(): Promise<CommodityFundamentalContext> {
+  if (!config.FMP_API_KEY) {
+    return null;
+  }
+
+  try {
+    const url = new URL("https://financialmodelingprep.com/api/v3/quote/DX-Y.NYB,^TNX");
+    url.searchParams.set("apikey", config.FMP_API_KEY);
+    const response = await fetch(url);
+    if (!response.ok) {
+      return null;
+    }
+
+    const payload = await response.json() as Array<{ symbol?: string; changesPercentage?: number | string; changePercentage?: number | string; change?: number | string }>;
+    const bySymbol = new Map(payload.map((item) => [item.symbol, Number(item.changesPercentage ?? item.changePercentage ?? item.change)]));
+    const dollarChangePercent = bySymbol.get("DX-Y.NYB");
+    const yieldChangePercent = bySymbol.get("^TNX");
+    if (!Number.isFinite(dollarChangePercent) || !Number.isFinite(yieldChangePercent)) {
+      return null;
+    }
+
+    return { dollarChangePercent: Number(dollarChangePercent), yieldChangePercent: Number(yieldChangePercent), source: "fmp" };
+  } catch {
+    return null;
+  }
+}
+
+function buildFundamentalAnalysis(category: MarketAssetCategory, symbol: string, direction: "up" | "down" | "neutral", commodityContext?: CommodityFundamentalContext): MarketAgentFundamentalAnalysis {
   const bullish = direction === "up";
   const bearish = direction === "down";
 
@@ -876,14 +911,26 @@ function buildFundamentalAnalysis(category: MarketAssetCategory, symbol: string,
     const risks = symbol === "XAU/USD"
       ? ["higher real yields", "stronger USD", "reduced haven demand"]
       : ["manufacturing slowdown", "risk-off liquidation", "USD strength"];
+    if (commodityContext) {
+      const pressure = commodityContext.dollarChangePercent + commodityContext.yieldChangePercent;
+      const bias = pressure > 0.05 ? "bearish" : pressure < -0.05 ? "bullish" : "neutral";
+      const macroScore = bias === "bearish" ? 68 : bias === "bullish" ? 67 : 55;
+      return {
+        source: "fmp",
+        bias,
+        macroScore,
+        summary: `${symbol} fundamental bias is ${bias}: DXY ${commodityContext.dollarChangePercent >= 0 ? "+" : ""}${commodityContext.dollarChangePercent.toFixed(2)}% and US 10Y yield ${commodityContext.yieldChangePercent >= 0 ? "+" : ""}${commodityContext.yieldChangePercent.toFixed(2)}% from FMP.`,
+        drivers,
+        risks,
+        catalystWindow: "Next 1-10 trading sessions around dollar index, Treasury yields, and metals demand headlines"
+      };
+    }
+
     return {
-      bias: bullish ? "bullish" : bearish ? "bearish" : "neutral",
-      macroScore: bullish ? 69 : bearish ? 66 : 54,
-      summary: bullish
-        ? `${symbol} benefits when the dollar softens and macro uncertainty keeps precious-metal demand supported.`
-        : bearish
-          ? `${symbol} weakens when real yields rise or industrial demand expectations soften.`
-          : `${symbol} is fundamentally balanced between USD direction and demand expectations.`,
+      source: "proxy",
+      bias: "neutral",
+      macroScore: 50,
+      summary: `${symbol} fundamental data is unavailable; no independent live dollar/yield confirmation was received.`,
       drivers,
       risks,
       catalystWindow: "Next 1-10 trading sessions around yields, dollar trend, and demand headlines"
@@ -891,6 +938,7 @@ function buildFundamentalAnalysis(category: MarketAssetCategory, symbol: string,
   }
 
   return {
+    source: "proxy",
     bias: bullish ? "bullish" : bearish ? "bearish" : "neutral",
     macroScore: bullish ? 70 : bearish ? 67 : 53,
     summary: bullish
@@ -1026,7 +1074,8 @@ export function buildSignal(
   candles: { t: number; o: number; h: number; l: number; c: number }[],
   source: HistorySource,
   liveSpotPrice?: number | null,
-  calibrationStatsByTimeframe?: CalibrationStatsByTimeframe
+  calibrationStatsByTimeframe?: CalibrationStatsByTimeframe,
+  commodityContext?: CommodityFundamentalContext
 ): MarketAgentTimeframeSignal | null {
   const hasRecognizedCandle = !!pattern.candlestickPattern && pattern.candlestickPattern !== "none";
   const hasUsableConfidence = pattern.confidence >= 60;
@@ -1040,7 +1089,7 @@ export function buildSignal(
   const baseConfidence = Math.round(pattern.confidence);
   const strategiesApplied = strategiesForPattern(pattern.pattern, pattern.direction, category, symbol);
   const technicals = buildTechnicalAnalysis(symbol, timeframe, candles, pattern.support, pattern.resistance);
-  const fundamentals = buildFundamentalAnalysis(category, symbol, pattern.direction);
+  const fundamentals = buildFundamentalAnalysis(category, symbol, pattern.direction, commodityContext);
   const sentimentFlow = buildSentimentFlowProxy(symbol, timeframe, pattern.direction, pattern.pattern, technicals, fundamentals);
   const volatilityAdjustment = computeVolatilityConfidenceAdjustment(technicals);
   const oscillatorAdjustment = computeOscillatorConfidenceAdjustment(technicals);
@@ -1136,6 +1185,7 @@ async function buildMarketAgentsAnalysis(): Promise<MarketAgentsResponse> {
   const sources = new Set<HistorySource>();
   const generatedAt = new Date().toISOString();
   const calibrationStatsByTimeframe = buildCalibrationStatsByTimeframe();
+  const commodityFundamentalContext = await fetchCommodityFundamentalContext();
   const mt4Snapshot = await getLatestMt4Snapshot();
   const mt4QuotesBySymbol = new Map<string, number>();
 
@@ -1171,7 +1221,7 @@ async function buildMarketAgentsAnalysis(): Promise<MarketAgentsResponse> {
             return null;
           }
 
-          const signal = buildSignal(symbol, config.category, timeframe, pattern, frame.candles, frame.source, liveSpotPrice, calibrationStatsByTimeframe);
+          const signal = buildSignal(symbol, config.category, timeframe, pattern, frame.candles, frame.source, liveSpotPrice, calibrationStatsByTimeframe, commodityFundamentalContext);
           if (signal) {
             sources.add(frame.source);
             if (config.category === "forex") {

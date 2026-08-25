@@ -254,6 +254,7 @@ export type MarketAgentTechnicalAnalysis = {
 };
 
 export type MarketAgentFundamentalAnalysis = {
+  source?: "fmp" | "proxy";
   bias: "bullish" | "bearish" | "neutral";
   macroScore: number;
   summary: string;
