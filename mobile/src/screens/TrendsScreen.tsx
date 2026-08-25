@@ -1,5 +1,5 @@
 import { StyleSheet, Text, View } from "react-native";
-import { fetchMarketTrends } from "../api/client";
+import { fetchMarketAgents, fetchMarketTrends } from "../api/client";
 import { REFRESH_INTERVAL_MS } from "../constants";
 import { usePollingData } from "../hooks/usePollingData";
 import { theme } from "../theme";
@@ -22,6 +22,10 @@ function suggestionColor(direction: "up" | "down", confidence: number) {
 
 export function TrendsScreen() {
   const { data, loading, error, notice } = usePollingData(fetchMarketTrends, REFRESH_INTERVAL_MS, "market-trends");
+  const { data: agentsData } = usePollingData(fetchMarketAgents, 5 * 60_000, "market-agents");
+  const validatedDirections = new Map(
+    (agentsData?.data ?? []).flatMap((agent) => agent.symbols.map((symbol) => [symbol.symbol, symbol.bestSignal.direction] as const))
+  );
 
   return (
     <View>
@@ -36,7 +40,11 @@ export function TrendsScreen() {
           </Text>
         ) : null}
 
-        {(data?.data ?? []).map((item) => (
+        {(data?.data ?? []).map((item) => {
+          const validatedDirection = validatedDirections.get(item.symbol);
+          const direction = validatedDirection === "up" || validatedDirection === "down" ? validatedDirection : item.direction;
+          const momentum = direction === "up" ? "Up" : "Down";
+          return (
           <View key={item.symbol} style={styles.row}>
             <View>
               <Text style={styles.symbol}>{item.symbol}</Text>
@@ -44,18 +52,19 @@ export function TrendsScreen() {
             </View>
             <View style={styles.right}>
               <Text style={styles.price}>{item.price.toFixed(2)}</Text>
-              <Text style={[styles.change, { color: trendColor(item.direction) }]}>
+              <Text style={[styles.change, { color: trendColor(direction) }]}>
                 {item.changePercent.toFixed(2)}%
               </Text>
-              <Text style={[styles.momentum, { color: trendColor(item.direction) }]}>Momentum {item.momentum}</Text>
-              <Text style={[styles.suggestion, { color: suggestionColor(item.direction, item.confidence) }]}>
-                Suggestion {item.momentumSuggestion}
+              <Text style={[styles.momentum, { color: trendColor(direction) }]}>Momentum {momentum}</Text>
+              <Text style={[styles.suggestion, { color: suggestionColor(direction, item.confidence) }]}>
+                Suggestion {momentum}
                 {item.confidence < 65 ? " (Weak)" : ""}
               </Text>
               <Text style={styles.confidence}>Signal {item.confidence}%</Text>
             </View>
           </View>
-        ))}
+          );
+        })}
       </SectionCard>
     </View>
   );
