@@ -1,4 +1,4 @@
-import { getLiveForexSpotPrice } from "./marketService.js";
+import { getLiveForexSpotPrice, getLiveMetalSpotPrice } from "./marketService.js";
 import { config } from "../config.js";
 import { getLatestMt4Snapshot } from "./mt4Service.js";
 import { getMarketHistory, type HistoryTimeframe, type MarketAssetCategory, type MarketPatternSignal, type HistorySource, type CandlestickPattern } from "./marketHistoryService.js";
@@ -1211,7 +1211,9 @@ async function buildMarketAgentsAnalysis(): Promise<MarketAgentsResponse> {
     for (const symbol of config.symbols) {
       const liveSpotPrice = config.category === "forex"
         ? resolveLiveSpotPriceFromMt4(symbol, mt4QuotesBySymbol) ?? await getLiveForexSpotPrice(symbol)
-        : null;
+        : config.category === "commodity"
+          ? await getLiveMetalSpotPrice(symbol)
+          : null;
       const symbolHistory = history.data[symbol] ?? {};
       const timeframeSignals = recommendationTimeframes
         .map((timeframe) => {

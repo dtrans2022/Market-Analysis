@@ -218,6 +218,41 @@ export async function getLiveForexSpotPrice(pair: string): Promise<number | null
   return null;
 }
 
+const METAL_SPOT_SYMBOLS: Record<string, string> = {
+  "XAU/USD": "XAU",
+  "XAG/USD": "XAG"
+};
+
+export async function getLiveMetalSpotPrice(symbol: string): Promise<number | null> {
+  const metalCode = METAL_SPOT_SYMBOLS[symbol];
+  if (!metalCode) {
+    return null;
+  }
+
+  try {
+    const response = await fetch(`https://api.gold-api.com/price/${encodeURIComponent(metalCode)}`, {
+      headers: {
+        "User-Agent": "market-analysis-api",
+        Accept: "application/json,text/plain,*/*"
+      }
+    });
+
+    if (!response.ok) {
+      return null;
+    }
+
+    const payload = await response.json() as { price?: unknown; currency?: unknown };
+    const price = Number(payload.price);
+    if (payload.currency === "USD" && Number.isFinite(price) && price > 0) {
+      return price;
+    }
+  } catch {
+    // Fall through to null.
+  }
+
+  return null;
+}
+
 async function getExchangeRateFallback(pairs: string[]) {
   const bases = Array.from(new Set(pairs.map((pair) => pair.split("/")[0])));
   const rates = new Map<string, number>();

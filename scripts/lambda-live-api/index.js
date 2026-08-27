@@ -343,6 +343,40 @@ async function fetchYahooForexSpotPrice(symbol) {
   return null;
 }
 
+const METAL_SPOT_SYMBOLS = {
+  "XAU/USD": "XAU",
+  "XAG/USD": "XAG"
+};
+
+async function fetchMetalSpotPrice(symbol) {
+  const metalCode = METAL_SPOT_SYMBOLS[symbol];
+  if (!metalCode) {
+    return null;
+  }
+
+  try {
+    const response = await fetch(`https://api.gold-api.com/price/${encodeURIComponent(metalCode)}`, {
+      headers: {
+        "User-Agent": "market-analysis-live-api",
+        Accept: "application/json,text/plain,*/*"
+      }
+    });
+    if (!response.ok) {
+      return null;
+    }
+
+    const payload = await response.json();
+    const price = Number(payload?.price);
+    if (payload?.currency === "USD" && Number.isFinite(price) && price > 0) {
+      return price;
+    }
+  } catch {
+    // Fall through to null.
+  }
+
+  return null;
+}
+
 async function getLiveForexQuoteFeed(pairs) {
   const timestamp = new Date().toISOString();
   const yahooPrices = await Promise.all(pairs.map(async (pair) => [pair, await fetchYahooForexSpotPrice(HISTORY_SYMBOLS[pair].yahooCode)]));
@@ -2478,7 +2512,9 @@ async function buildLiveAgents() {
     for (const symbol of config.symbols) {
       const liveSpotPrice = config.category === "forex"
         ? (resolveLiveSpotPriceFromMt4(symbol, mt4MidPrices) ?? await fetchYahooForexSpotPrice(HISTORY_SYMBOLS[symbol].yahooCode))
-        : null;
+        : config.category === "commodity"
+          ? await fetchMetalSpotPrice(symbol)
+          : null;
       const symbolHistory = history.data[symbol] || {};
       const timeframeSignals = recommendationTimeframes.map((timeframe) => {
         const frame = symbolHistory[timeframe];
@@ -2505,7 +2541,7 @@ async function buildLiveAgents() {
           });
         }
 
-        const signal = buildSignal(symbol, config.category, timeframe, pattern, frame.candles, frame.source, config.category === "forex" ? liveSpotPrice : null, sentimentFlowContext);
+        const signal = buildSignal(symbol, config.category, timeframe, pattern, frame.candles, frame.source, liveSpotPrice, sentimentFlowContext);
         if (signal) {
           sources.add(frame.source);
         }
