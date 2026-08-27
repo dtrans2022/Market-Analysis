@@ -196,7 +196,7 @@ function compressCandles(candles: OhlcCandle[], targetCount: number) {
     const chunk = candles.slice(start, Math.max(start + 1, end));
 
     output.push({
-      t: chunk[0].t,
+      t: chunk[chunk.length - 1].t,
       o: chunk[0].o,
       h: Math.max(...chunk.map((candle) => candle.h)),
       l: Math.min(...chunk.map((candle) => candle.l)),
