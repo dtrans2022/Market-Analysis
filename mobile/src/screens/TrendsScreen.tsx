@@ -20,6 +20,14 @@ function suggestionColor(direction: "up" | "down", confidence: number) {
   return direction === "up" ? theme.colors.positive : theme.colors.negative;
 }
 
+function formatPrice(price: number, currency?: string) {
+  if (currency) {
+    return `${currency} ${price.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  }
+
+  return price.toFixed(2);
+}
+
 export function TrendsScreen() {
   const { data, loading, error, notice } = usePollingData(fetchMarketTrends, REFRESH_INTERVAL_MS, "market-trends");
   const { data: agentsData } = usePollingData(fetchMarketAgents, 5 * 60_000, "market-agents");
@@ -51,7 +59,7 @@ export function TrendsScreen() {
               <Text style={styles.name}>{item.name}</Text>
             </View>
             <View style={styles.right}>
-              <Text style={styles.price}>{item.price.toFixed(2)}</Text>
+              <Text style={styles.price}>{formatPrice(item.price, item.currency)}</Text>
               <Text style={[styles.change, { color: trendColor(direction) }]}>
                 {item.changePercent.toFixed(2)}%
               </Text>

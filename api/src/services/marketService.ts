@@ -45,6 +45,7 @@ export type MarketTrend = {
   name: string;
   category: "forex" | "commodity" | "oil";
   price: number;
+  currency?: string;
   changePercent: number;
   direction: TrendDirection;
   momentum: "Up" | "Down";
@@ -94,9 +95,10 @@ const fallbackTrends: MarketTrend[] = [
   },
   {
     symbol: "XAU/USD",
-    name: "Gold Spot",
+    name: "Gold Spot (AUD)",
     category: "commodity",
-    price: 2398.12,
+    price: 4600,
+    currency: "AUD",
     changePercent: 0.65,
     direction: "up",
     momentum: "Up",
@@ -105,9 +107,10 @@ const fallbackTrends: MarketTrend[] = [
   },
   {
     symbol: "XAG/USD",
-    name: "Silver Spot",
+    name: "Silver Spot (AUD)",
     category: "commodity",
-    price: 31.14,
+    price: 60,
+    currency: "AUD",
     changePercent: -0.44,
     direction: "down",
     momentum: "Down",
@@ -468,6 +471,36 @@ function toDirection(changePercent: number): TrendDirection {
   return "down";
 }
 
+function usdToAudRate(audUsdPrice: unknown) {
+  const audUsd = Number(audUsdPrice);
+  if (!Number.isFinite(audUsd) || audUsd <= 0) {
+    return null;
+  }
+
+  return 1 / audUsd;
+}
+
+function toAudMetalPrice(price: number, usdAud: number | null) {
+  if (!usdAud) {
+    return price;
+  }
+
+  return Number((price * usdAud).toFixed(2));
+}
+
+function withAudMetalDisplay(item: MarketTrend, usdAud: number | null): MarketTrend {
+  if (item.category !== "commodity" || (item.symbol !== "XAU/USD" && item.symbol !== "XAG/USD")) {
+    return item;
+  }
+
+  return {
+    ...item,
+    name: `${item.name} (AUD)`,
+    price: toAudMetalPrice(item.price, usdAud),
+    currency: "AUD"
+  };
+}
+
 type YahooQuoteResult = {
   symbol?: string;
   regularMarketPrice?: number;
@@ -514,6 +547,7 @@ async function fetchYahooTrends(): Promise<MarketTrend[] | null> {
   };
 
   const map = new Map((payload.quoteResponse?.result ?? []).map((item) => [item.symbol, item]));
+  const usdAud = usdToAudRate(map.get("AUDUSD=X")?.regularMarketPrice);
 
   const trends = yahooSymbols
     .map((symbol) => {
@@ -528,7 +562,7 @@ async function fetchYahooTrends(): Promise<MarketTrend[] | null> {
       const direction = toDirection(changePercent);
       const confidence = Math.max(55, Math.min(95, Math.round(Math.abs(changePercent) * 10 + 60)));
 
-      return {
+      return withAudMetalDisplay({
         symbol: symbol.label,
         name: symbol.name,
         category: symbol.category,
@@ -538,7 +572,7 @@ async function fetchYahooTrends(): Promise<MarketTrend[] | null> {
         momentum: direction === "up" ? "Up" : "Down",
         momentumSuggestion: direction === "up" ? "Up" : "Down",
         confidence
-      } satisfies MarketTrend;
+      }, usdAud) satisfies MarketTrend;
     })
     .filter((item): item is MarketTrend => item !== null);
 
@@ -572,6 +606,7 @@ async function fetchFmpTrends(): Promise<MarketTrend[] | null> {
 
     const payload = await response.json() as Array<{ symbol?: string; price?: number | string; changesPercentage?: number | string; changePercentage?: number | string; change?: number | string }>;
     const quoteByCode = new Map(payload.map((item) => [item.symbol, item]));
+    const usdAud = usdToAudRate(quoteByCode.get("AUDUSD")?.price);
     const trends = symbols.map((item) => {
       const quote = quoteByCode.get(item.code);
       const price = Number(quote?.price);
@@ -581,7 +616,7 @@ async function fetchFmpTrends(): Promise<MarketTrend[] | null> {
       }
 
       const direction = toDirection(changePercent);
-      return {
+      return withAudMetalDisplay({
         symbol: item.label,
         name: item.name,
         category: item.category,
@@ -591,7 +626,7 @@ async function fetchFmpTrends(): Promise<MarketTrend[] | null> {
         momentum: direction === "up" ? "Up" : "Down",
         momentumSuggestion: direction === "up" ? "Up" : "Down",
         confidence: Math.max(55, Math.min(95, Math.round(Math.abs(changePercent) * 10 + 60)))
-      } satisfies MarketTrend;
+      }, usdAud) satisfies MarketTrend;
     }).filter((item): item is MarketTrend => item !== null);
 
     return trends.length > 0 ? trends : null;
@@ -693,8 +728,9 @@ export async function getMarketTrends(): Promise<MarketTrendsResponse> {
 
   const usable = quotes.filter((item): item is MarketTrend => Boolean(item));
   if (usable.length > 0) {
+    const usdAud = usdToAudRate(usable.find((item) => item.symbol === "AUD/USD")?.price);
     return {
-      data: usable,
+      data: usable.map((item) => withAudMetalDisplay(item, usdAud)),
       source: "live"
     };
   }

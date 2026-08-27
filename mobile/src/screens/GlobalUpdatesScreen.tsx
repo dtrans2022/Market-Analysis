@@ -104,8 +104,8 @@ const PAIR_BASE_PRICE: Record<string, number> = {
 };
 
 const COMMODITY_BASE_PRICE: Record<string, number> = {
-  "XAU/USD": 2398.12,
-  "XAG/USD": 31.14
+  "XAU/USD": 4600,
+  "XAG/USD": 60
 };
 
 const OIL_BASE_PRICE: Record<string, number> = {

@@ -360,8 +360,8 @@ const FALLBACK_FOREX_PRICES: Record<string, number> = {
 };
 
 const FALLBACK_ASSET_PRICES: Record<string, number> = {
-  "XAU/USD": 2398.12,
-  "XAG/USD": 31.14,
+  "XAU/USD": 4600,
+  "XAG/USD": 60,
   BRENT: 82.1,
   WTI: 78.32
 };

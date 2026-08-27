@@ -32,6 +32,7 @@ export type MarketTrend = {
   name: string;
   category: "forex" | "commodity" | "oil";
   price: number;
+  currency?: string;
   changePercent: number;
   direction: "up" | "down";
   momentum: "Up" | "Down";

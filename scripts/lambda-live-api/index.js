@@ -80,8 +80,8 @@ const DEFAULT_REFERENCE_PRICES = {
   "EUR/CAD": 1.48,
   "USD/JPY": 156.41,
   "EUR/JPY": 170.3,
-  "XAU/USD": 2398.12,
-  "XAG/USD": 31.14,
+  "XAU/USD": 4600,
+  "XAG/USD": 60,
   BRENT: 82.1,
   WTI: 78.32
 };
@@ -3533,13 +3533,22 @@ async function getLiveNews() {
   };
 }
 
-function makeTrend(symbol, name, category, price, changePercent) {
+function toAudMetalPrice(price, usdAud) {
+  if (!usdAud) {
+    return price;
+  }
+
+  return Number((price * usdAud).toFixed(2));
+}
+
+function makeTrend(symbol, name, category, price, changePercent, currency) {
   const direction = changePercent >= 0 ? "up" : "down";
   return {
     symbol,
     name,
     category,
     price,
+    ...(currency ? { currency } : {}),
     changePercent,
     direction,
     momentum: direction === "up" ? "Up" : "Down",
@@ -3559,6 +3568,7 @@ async function getLiveTrends() {
   const eurusd = Number(eur?.rates?.USD || 0);
   const gbpusd = Number(gbp?.rates?.USD || 0);
   const usdjpy = Number(usd?.rates?.JPY || 0);
+  const usdAud = Number(usd?.rates?.AUD || 0);
 
   const drift = Number(jpy?.rates?.USD || 0) > 0
     ? ((Number(usd?.rates?.EUR || 0) + Number(usd?.rates?.GBP || 0)) / 2 - 0.86) * 2
@@ -3583,12 +3593,12 @@ async function getLiveTrends() {
 
     if (Number.isFinite(goldPrice) && goldPrice > 0) {
       const goldChange = typeof goldChart?.changePercent === "number" ? goldChart.changePercent : 0;
-      trends.push(makeTrend("XAU/USD", "Gold Spot", "commodity", goldPrice, goldChange));
+      trends.push(makeTrend("XAU/USD", "Gold Spot (AUD)", "commodity", toAudMetalPrice(goldPrice, usdAud), goldChange, "AUD"));
     }
 
     if (Number.isFinite(silverPrice) && silverPrice > 0) {
       const silverChange = typeof silverChart?.changePercent === "number" ? silverChart.changePercent : 0;
-      trends.push(makeTrend("XAG/USD", "Silver Spot", "commodity", silverPrice, silverChange));
+      trends.push(makeTrend("XAG/USD", "Silver Spot (AUD)", "commodity", toAudMetalPrice(silverPrice, usdAud), silverChange, "AUD"));
     }
   } catch {
     // Keep available trends even if commodity provider is temporarily unavailable.
