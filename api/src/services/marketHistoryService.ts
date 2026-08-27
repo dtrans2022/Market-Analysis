@@ -272,11 +272,11 @@ function toCandleSeries(payload: {
   close?: unknown;
   volume?: unknown;
 }) {
-  const timestamps = isFiniteNumberArray(payload.timestamp) ? payload.timestamp : [];
-  const opens = isFiniteNumberArray(payload.open) ? payload.open : [];
-  const highs = isFiniteNumberArray(payload.high) ? payload.high : [];
-  const lows = isFiniteNumberArray(payload.low) ? payload.low : [];
-  const closes = isFiniteNumberArray(payload.close) ? payload.close : [];
+  const timestamps = Array.isArray(payload.timestamp) ? payload.timestamp : [];
+  const opens = Array.isArray(payload.open) ? payload.open : [];
+  const highs = Array.isArray(payload.high) ? payload.high : [];
+  const lows = Array.isArray(payload.low) ? payload.low : [];
+  const closes = Array.isArray(payload.close) ? payload.close : [];
   const volumes = Array.isArray(payload.volume) ? payload.volume : [];
   const length = Math.min(timestamps.length, opens.length || closes.length, highs.length || closes.length, lows.length || closes.length, closes.length);
 
@@ -287,12 +287,15 @@ function toCandleSeries(payload: {
       continue;
     }
 
-    const open = Number(opens[index] ?? close);
-    const high = Number(highs[index] ?? Math.max(open, close));
-    const low = Number(lows[index] ?? Math.min(open, close));
+    const rawOpen = Number(opens[index]);
+    const open = Number.isFinite(rawOpen) && rawOpen > 0 ? rawOpen : close;
+    const rawHigh = Number(highs[index]);
+    const high = Number.isFinite(rawHigh) && rawHigh > 0 ? rawHigh : Math.max(open, close);
+    const rawLow = Number(lows[index]);
+    const low = Number.isFinite(rawLow) && rawLow > 0 ? rawLow : Math.min(open, close);
     const timestamp = Number(timestamps[index]);
 
-    if (!Number.isFinite(timestamp)) {
+    if (!Number.isFinite(timestamp) || high < low) {
       continue;
     }
 
@@ -849,6 +852,46 @@ function candlestickImpactAtLevels(
   };
 }
 
+function detectRecentCandlestickPattern(
+  candles: OhlcCandle[],
+  support: number,
+  resistance: number,
+  averageRange: number,
+  fallbackSlope: number
+) {
+  const tolerance = Math.max(averageRange * 1.5, (candles[candles.length - 1]?.c ?? 0) * 0.0015);
+  const start = Math.max(1, candles.length - 3);
+
+  for (let index = candles.length - 1; index >= start; index -= 1) {
+    const candle = candles[index];
+    const isAtSupport = candle.l <= support + tolerance;
+    const isAtResistance = candle.h >= resistance - tolerance;
+    const slopeBase = candles[Math.max(0, index - 10)]?.c ?? 0;
+    const slope = slopeBase > 0 ? ((candle.c - slopeBase) / slopeBase) * 100 : fallbackSlope;
+    const detection = detectCandlestickPattern(candles.slice(0, index + 1), slope, { isAtSupport, isAtResistance });
+
+    if (detection.pattern !== "none") {
+      return {
+        detection,
+        isAtSupport,
+        isAtResistance
+      };
+    }
+  }
+
+  const latest = candles[candles.length - 1];
+  return {
+    detection: {
+      pattern: "none" as CandlestickPattern,
+      bias: "neutral" as PatternDirection,
+      strength: 0,
+      note: "No high-conviction candlestick trigger on the latest bars."
+    },
+    isAtSupport: latest ? latest.l <= support + tolerance : false,
+    isAtResistance: latest ? latest.h >= resistance - tolerance : false
+  };
+}
+
 function volumeConfirmationImpact(
   candles: OhlcCandle[],
   pattern: PatternKind,
@@ -1271,11 +1314,9 @@ function classifyPattern(symbol: HistorySymbol, timeframe: HistoryTimeframe, can
     note = `${symbol.symbol} is showing directional momentum on the ${timeframeLabel(timeframe)} chart.`;
   }
 
-  const candlestick = detectCandlestickPattern(recentCandles, slope, {
-    isAtSupport: atSupport,
-    isAtResistance: atResistance
-  });
-  const candlestickImpact = candlestickImpactAtLevels(candlestick, direction, atSupport, atResistance);
+  const recentCandlestick = detectRecentCandlestickPattern(recentCandles, support, resistance, avgRange, slope);
+  const candlestick = recentCandlestick.detection;
+  const candlestickImpact = candlestickImpactAtLevels(candlestick, direction, recentCandlestick.isAtSupport, recentCandlestick.isAtResistance);
   const volumeImpact = volumeConfirmationImpact(recentCandles, pattern, direction, nearSupport, nearResistance);
   const trendImpact = trendStructureImpact(recentCandles, recentCloses, direction, pattern);
   const recurrenceImpact = historicalRecurrenceImpact(recentCandles, direction, pattern, atSupport, atResistance);
@@ -1313,8 +1354,8 @@ function classifyPattern(symbol: HistorySymbol, timeframe: HistoryTimeframe, can
     historicalRecurrenceScore: recurrenceImpact.score,
     historicalRecurrenceSummary: recurrenceImpact.summary,
     volumeConfirmation: volumeImpact.confirmation,
-    isAtSupport: atSupport,
-    isAtResistance: atResistance,
+    isAtSupport: recentCandlestick.isAtSupport,
+    isAtResistance: recentCandlestick.isAtResistance,
     note
   };
 }

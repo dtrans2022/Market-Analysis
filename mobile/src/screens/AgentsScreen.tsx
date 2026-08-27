@@ -729,8 +729,8 @@ function AgentCard({
             return (
             <View key={symbol.symbol} style={styles.symbolCard}>
             <View style={styles.symbolHeader}>
-              <Text style={styles.symbol}>{symbol.symbol}</Text>
-              <Text style={styles.symbolPrice}>{formatPrice(symbol.currentPrice)}</Text>
+              <Text style={styles.symbol}>{symbol.symbol} | Live {formatPrice(symbol.currentPrice)}</Text>
+              <Text style={styles.symbolPrice}>Current {formatPrice(symbol.currentPrice)}</Text>
             </View>
             <Text style={styles.symbolMeta}>Best timeframe {symbol.bestSignal.timeframe}</Text>
             <Text style={styles.symbolMeta}>
