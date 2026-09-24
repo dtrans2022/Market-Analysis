@@ -1,101 +1,383 @@
-import { useEffect, useState } from "react";
+import { useMemo, useState } from "react";
 import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
-import { fetchMarketHistory } from "../api/client";
 import { SectionCard } from "../components/SectionCard";
 import { theme } from "../theme";
-import { CandlestickOutcomeDetail, CandlestickOutcomeSummary, MarketHistoryResponse } from "../types";
+import dataset from "../data/commodity-pattern-history.json";
 
-const CURRENCY_PAIRS = [
-  "AUD/USD", "AUD/CHF", "AUD/JPY", "AUD/NZD", "CAD/JPY", "EUR/AUD", "EUR/CAD", "EUR/GBP", "EUR/JPY",
-  "EUR/NZD", "EUR/USD", "GBP/AUD", "GBP/NZD", "GBP/USD", "NZD/JPY", "USD/CAD", "USD/CHF", "USD/JPY"
-];
+type Detail = {
+  date: string;
+  timestamp: number;
+  direction: "bullish" | "bearish";
+  entry: number;
+  reward: number;
+  risk: number;
+  riskReward: number;
+  success: boolean;
+};
 
-type ReportRow = { pair: string; summary: CandlestickOutcomeSummary };
-type DetailFilter = "occurred" | "successful" | "unsuccessful" | "neutral";
+type PatternRecord = {
+  commodity: string;
+  symbol: string;
+  timeframe: string;
+  pattern: string;
+  zone: "support" | "resistance";
+  occurrences: number;
+  successes: number;
+  failures: number;
+  successRate: number;
+  avgRiskReward: number;
+  avgReward: number;
+  avgRisk: number;
+  details: Detail[];
+};
+
+type Dataset = {
+  generatedAt: string;
+  source: string;
+  timeframes: string[];
+  commodities: string[];
+  records: PatternRecord[];
+};
+
+const typed = dataset as Dataset;
 
 function labelPattern(pattern: string) {
-  return pattern.replaceAll("-", " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
+  return pattern.replace(/-/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
-function volumeLabel(detail: CandlestickOutcomeDetail) {
-  return detail.volumeRatio == null ? "Volume unavailable" : `${detail.volumeRatio}x of prior 20-day average`;
-}
-
-function formatCandleSession(timestamp: number) {
-  const date = new Date(timestamp * 1000);
-  const utcDate = date.toISOString().slice(0, 10);
-  const sydneyDate = new Intl.DateTimeFormat("en-CA", {
-    timeZone: "Australia/Sydney",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit"
-  }).format(date);
-  return `Source UTC ${utcDate} | Sydney ${sydneyDate}`;
+function successTone(rate: number) {
+  if (rate >= 0.7) return theme.colors.positive;
+  if (rate >= 0.5) return theme.colors.warning;
+  return theme.colors.negative;
 }
 
 export function HistoryScreen() {
-  const [history, setHistory] = useState<MarketHistoryResponse | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [selectedPair, setSelectedPair] = useState<string | null>(null);
-  const [detail, setDetail] = useState<{ row: ReportRow; filter: DetailFilter } | null>(null);
+  const [timeframe, setTimeframe] = useState<string>("1D");
+  const [commodity, setCommodity] = useState<string | null>(null);
+  const [expanded, setExpanded] = useState<string | null>(null);
 
-  useEffect(() => {
-    let cancelled = false;
-    async function load() {
-      setLoading(true);
-      try {
-        const response = await fetchMarketHistory(CURRENCY_PAIRS, ["1Day"], 5);
-        if (!cancelled) setHistory(response);
-      } catch (loadError) {
-        if (!cancelled) setError(loadError instanceof Error ? loadError.message : "Unable to load daily pattern history");
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
-    }
-    void load();
-    return () => { cancelled = true; };
-  }, []);
-
-  const rows: ReportRow[] = CURRENCY_PAIRS.flatMap((pair) => (history?.candlestickOutcomes[pair]?.["1Day"] ?? [])
-    .filter((summary) => summary.formations > 0)
-    .map((summary) => ({ pair, summary })))
-    .filter((row) => !selectedPair || row.pair === selectedPair)
-    .sort((left, right) => right.summary.formations - left.summary.formations || left.pair.localeCompare(right.pair));
+  const rows = useMemo(() => {
+    return typed.records
+      .filter((row) => row.timeframe === timeframe)
+      .filter((row) => !commodity || row.commodity === commodity)
+      .sort((a, b) => {
+        if (b.successRate !== a.successRate) return b.successRate - a.successRate;
+        return b.occurrences - a.occurrences;
+      });
+  }, [timeframe, commodity]);
 
   return (
     <View>
-      <SectionCard title="Daily Candlestick Pattern Report" subtitle="Five-year daily analysis across all forex pairs">
-        <Text style={styles.intro}>Patterns are counted only when formed at rolling support or resistance. Success means the close five daily bars later moved in the pattern's expected direction.</Text>
+      <SectionCard
+        title="Commodity Candle Pattern History"
+        subtitle="Live Yahoo data | last 3 years (1D) and 730 days (1h/4h) | evaluated at swing support/resistance zones"
+      >
+        <Text style={styles.intro}>
+          Success = price closed in the expected direction within the lookahead window. R:R = average reward / adverse
+          excursion, capped at 10.0. Only patterns with 3+ occurrences are shown.
+        </Text>
+
+        <Text style={styles.groupLabel}>Timeframe</Text>
         <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.filters}>
           <View style={styles.filterRow}>
-            <Pressable onPress={() => setSelectedPair(null)} style={[styles.filter, !selectedPair && styles.filterActive]}><Text style={styles.filterText}>All pairs</Text></Pressable>
-            {CURRENCY_PAIRS.map((pair) => <Pressable key={pair} onPress={() => setSelectedPair(pair)} style={[styles.filter, selectedPair === pair && styles.filterActive]}><Text style={styles.filterText}>{pair}</Text></Pressable>)}
+            {typed.timeframes.map((tf) => (
+              <Pressable
+                key={tf}
+                onPress={() => setTimeframe(tf)}
+                style={[styles.filter, timeframe === tf && styles.filterActive]}
+              >
+                <Text style={styles.filterText}>{tf}</Text>
+              </Pressable>
+            ))}
           </View>
         </ScrollView>
-        {loading ? <Text style={styles.muted}>Loading five-year daily candle history for all pairs...</Text> : null}
-        {error ? <Text style={styles.error}>{error}</Text> : null}
-        <View style={styles.header}><Text style={[styles.cell, styles.pattern]}>Candle stick pattern</Text><Text style={[styles.cell, styles.pair]}>Currency pair</Text><Text style={[styles.cell, styles.count]}>Occurred</Text><Text style={[styles.cell, styles.count]}>Successful</Text><Text style={[styles.cell, styles.count]}>Unsuccessful</Text><Text style={[styles.cell, styles.count]}>Neutral</Text><Text style={[styles.cell, styles.reason]}>Reason / volume</Text></View>
+
+        <Text style={styles.groupLabel}>Commodity</Text>
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.filters}>
+          <View style={styles.filterRow}>
+            <Pressable
+              onPress={() => setCommodity(null)}
+              style={[styles.filter, commodity === null && styles.filterActive]}
+            >
+              <Text style={styles.filterText}>All</Text>
+            </Pressable>
+            {typed.commodities.map((name) => (
+              <Pressable
+                key={name}
+                onPress={() => setCommodity(name)}
+                style={[styles.filter, commodity === name && styles.filterActive]}
+              >
+                <Text style={styles.filterText}>{name}</Text>
+              </Pressable>
+            ))}
+          </View>
+        </ScrollView>
+
+        <View style={styles.headerRow}>
+          <Text style={[styles.cell, styles.cellCommodity, styles.headerText]}>Commodity</Text>
+          <Text style={[styles.cell, styles.cellPattern, styles.headerText]}>Candle Pattern</Text>
+          <Text style={[styles.cell, styles.cellCount, styles.headerText]}>Occurred (S/R)</Text>
+          <Text style={[styles.cell, styles.cellRate, styles.headerText]}>Success %</Text>
+          <Text style={[styles.cell, styles.cellRR, styles.headerText]}>R:R</Text>
+        </View>
+
+        {rows.length === 0 ? (
+          <Text style={styles.muted}>No patterns matched the current filters.</Text>
+        ) : null}
+
         {rows.map((row) => {
-          const sample = row.summary.details[0];
-          const isSelected = detail?.row.pair === row.pair && detail.row.summary.pattern === row.summary.pattern;
-          return <View key={`${row.pair}-${row.summary.pattern}`}>
-            <View style={styles.row}>
-              <Pressable onPress={() => setDetail({ row, filter: "occurred" })} style={[styles.cell, styles.pattern]}><Text style={styles.patternText}>{labelPattern(row.summary.pattern)}</Text></Pressable><Text style={[styles.cell, styles.pair]}>{row.pair}</Text><Pressable onPress={() => setDetail({ row, filter: "occurred" })} style={[styles.cell, styles.count, styles.countButton]}><Text style={styles.countLink}>{row.summary.formations}</Text></Pressable><Pressable onPress={() => setDetail({ row, filter: "successful" })} style={[styles.cell, styles.count, styles.countButton]}><Text style={[styles.countLink, styles.success]}>{row.summary.expectedDirectionCount}</Text></Pressable><Pressable onPress={() => setDetail({ row, filter: "unsuccessful" })} style={[styles.cell, styles.count, styles.countButton]}><Text style={[styles.countLink, styles.failure]}>{row.summary.oppositeDirectionCount}</Text></Pressable><Pressable onPress={() => setDetail({ row, filter: "neutral" })} style={[styles.cell, styles.count, styles.countButton]}><Text style={[styles.countLink, styles.neutral]}>{row.summary.neutralOutcomeCount}</Text></Pressable><Pressable onPress={() => setDetail({ row, filter: "occurred" })} style={[styles.cell, styles.reason]}><Text numberOfLines={2} style={styles.reasonText}>{sample ? `${sample.note} ${volumeLabel(sample)}` : "-"}</Text></Pressable>
+          const rowKey = `${row.commodity}-${row.pattern}-${row.zone}-${row.timeframe}`;
+          const isOpen = expanded === rowKey;
+          const successPct = (row.successRate * 100).toFixed(1);
+          const failurePct = (100 - row.successRate * 100).toFixed(1);
+          return (
+            <View key={rowKey}>
+              <Pressable
+                onPress={() => setExpanded(isOpen ? null : rowKey)}
+                style={[styles.dataRow, isOpen && styles.dataRowOpen]}
+              >
+                <Text style={[styles.cell, styles.cellCommodity, styles.cellText]} numberOfLines={2}>
+                  {row.commodity}
+                </Text>
+                <Text style={[styles.cell, styles.cellPattern, styles.cellText]} numberOfLines={2}>
+                  {labelPattern(row.pattern)}
+                </Text>
+                <Text style={[styles.cell, styles.cellCount, styles.cellText]}>
+                  {row.occurrences} ({row.zone === "support" ? "S" : "R"})
+                </Text>
+                <Text style={[styles.cell, styles.cellRate, styles.cellText, { color: successTone(row.successRate) }]}>
+                  {successPct}% / {failurePct}%
+                </Text>
+                <Text style={[styles.cell, styles.cellRR, styles.cellText]}>{row.avgRiskReward.toFixed(2)}</Text>
+              </Pressable>
+              {isOpen ? (
+                <View style={styles.detailBox}>
+                  <Text style={styles.detailHeader}>
+                    {row.commodity} | {labelPattern(row.pattern)} @ {row.zone.toUpperCase()} | {row.timeframe}
+                  </Text>
+                  <Text style={styles.detailMeta}>
+                    Successes {row.successes} / Failures {row.failures} | Avg reward {row.avgReward} | Avg risk {row.avgRisk}
+                  </Text>
+                  <View style={styles.detailTableHeader}>
+                    <Text style={[styles.detailCell, styles.detailDate, styles.detailHeaderText]}>Date (UTC)</Text>
+                    <Text style={[styles.detailCell, styles.detailDir, styles.detailHeaderText]}>Direction</Text>
+                    <Text style={[styles.detailCell, styles.detailEntry, styles.detailHeaderText]}>Entry</Text>
+                    <Text style={[styles.detailCell, styles.detailRR, styles.detailHeaderText]}>R:R</Text>
+                    <Text style={[styles.detailCell, styles.detailOutcome, styles.detailHeaderText]}>Outcome</Text>
+                  </View>
+                  {row.details.map((detail) => (
+                    <View key={`${detail.timestamp}-${detail.direction}`} style={styles.detailRow}>
+                      <Text style={[styles.detailCell, styles.detailDate, styles.detailText]}>{detail.date}</Text>
+                      <Text style={[styles.detailCell, styles.detailDir, styles.detailText]}>{detail.direction}</Text>
+                      <Text style={[styles.detailCell, styles.detailEntry, styles.detailText]}>
+                        {detail.entry.toFixed(2)}
+                      </Text>
+                      <Text style={[styles.detailCell, styles.detailRR, styles.detailText]}>
+                        {detail.riskReward.toFixed(2)}
+                      </Text>
+                      <Text
+                        style={[
+                          styles.detailCell,
+                          styles.detailOutcome,
+                          styles.detailText,
+                          { color: detail.success ? theme.colors.positive : theme.colors.negative }
+                        ]}
+                      >
+                        {detail.success ? "Success" : "Fail"}
+                      </Text>
+                    </View>
+                  ))}
+                  <Text style={styles.detailFootnote}>
+                    Showing latest {row.details.length} of {row.occurrences} occurrences.
+                  </Text>
+                </View>
+              ) : null}
             </View>
-            {isSelected && detail ? <View style={styles.detail}><View style={styles.detailHead}><Text style={styles.detailTitle}>{detail.filter.toUpperCase()} | {detail.row.pair} | {labelPattern(detail.row.summary.pattern)}</Text><Pressable onPress={() => setDetail(null)}><Text style={styles.close}>Close</Text></Pressable></View><Text style={styles.detailMeta}>Occurred {detail.row.summary.formations} | Successful {detail.row.summary.expectedDirectionCount} | Unsuccessful {detail.row.summary.oppositeDirectionCount} | Neutral {detail.row.summary.neutralOutcomeCount} | Support {detail.row.summary.atSupportCount} | Resistance {detail.row.summary.atResistanceCount}</Text><ScrollView style={styles.detailList} nestedScrollEnabled>{detail.row.summary.details.filter((item) => detail.filter === "occurred" || item.outcome === detail.filter).map((item) => <View key={`${item.timestamp}-${item.outcome}`} style={styles.detailRow}><Text style={styles.detailDate}>{formatCandleSession(item.timestamp)} | {item.outcome.toUpperCase()}</Text><Text style={styles.detailText}>{item.note}</Text><Text style={styles.detailText}>At {item.formedAt}; expected {item.expectedDirection}; close {item.entryClose.toFixed(5)} to {item.followThroughClose.toFixed(5)}; {volumeLabel(item)}.</Text></View>)}</ScrollView></View> : null}
-          </View>;
+          );
         })}
-        {!loading && rows.length === 0 ? <Text style={styles.muted}>No daily patterns were found with five-year coverage.</Text> : null}
+
+        <Text style={styles.source}>
+          {typed.source} | Data generated {new Date(typed.generatedAt).toLocaleString()}
+        </Text>
       </SectionCard>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  intro: { color: theme.colors.muted, fontSize: 12, lineHeight: 17 },
-  filters: { marginVertical: 12 }, filterRow: { flexDirection: "row", gap: 6 }, filter: { paddingVertical: 6, paddingHorizontal: 9, backgroundColor: "#102b3b", borderWidth: 1, borderColor: "#23546e", borderRadius: 5 }, filterActive: { backgroundColor: "#1d6977", borderColor: theme.colors.accent }, filterText: { color: theme.colors.text, fontSize: 11, fontWeight: "700" },
-  header: { flexDirection: "row", backgroundColor: "#163f57", borderWidth: 1, borderColor: "#23546e", paddingVertical: 8 }, row: { flexDirection: "row", borderLeftWidth: 1, borderRightWidth: 1, borderBottomWidth: 1, borderColor: "#23546e", paddingVertical: 9 }, cell: { color: theme.colors.text, fontSize: 10, paddingHorizontal: 4 }, pattern: { flex: 1.45, minWidth: 108 }, pair: { flex: 0.85, minWidth: 62 }, count: { flex: 0.62, minWidth: 48, textAlign: "center" }, countButton: { minHeight: 28, justifyContent: "center", backgroundColor: "#123246", borderRadius: 3, marginHorizontal: 1 }, reason: { flex: 2.25, minWidth: 160 }, patternText: { color: theme.colors.text, fontSize: 10 }, reasonText: { color: theme.colors.muted, fontSize: 10 }, countLink: { color: theme.colors.accent, fontSize: 12, fontWeight: "800", textAlign: "center", textDecorationLine: "underline" }, success: { color: theme.colors.positive }, failure: { color: theme.colors.negative }, neutral: { color: theme.colors.warning },
-  detail: { marginTop: 12, padding: 10, backgroundColor: "#102b3b", borderWidth: 1, borderColor: "#2d7a8b" }, detailHead: { flexDirection: "row", justifyContent: "space-between" }, detailTitle: { color: theme.colors.text, fontSize: 13, fontWeight: "800" }, close: { color: theme.colors.accent, fontSize: 12, fontWeight: "700" }, detailMeta: { color: theme.colors.muted, fontSize: 11, marginTop: 6 }, detailList: { maxHeight: 310 }, detailRow: { borderTopWidth: 1, borderTopColor: "#23546e", marginTop: 8, paddingTop: 8 }, detailDate: { color: theme.colors.text, fontSize: 11, fontWeight: "800" }, detailText: { color: theme.colors.muted, fontSize: 11, lineHeight: 16, marginTop: 2 },
-  muted: { color: theme.colors.muted, marginVertical: 8 }, error: { color: theme.colors.negative, marginVertical: 8 }
+  intro: {
+    color: theme.colors.muted,
+    fontSize: 12,
+    lineHeight: 17,
+    marginBottom: 10
+  },
+  groupLabel: {
+    color: theme.colors.muted,
+    fontSize: 11,
+    fontWeight: "800",
+    letterSpacing: 0.6,
+    textTransform: "uppercase",
+    marginTop: 6
+  },
+  filters: {
+    marginVertical: 6
+  },
+  filterRow: {
+    flexDirection: "row",
+    gap: 6
+  },
+  filter: {
+    paddingVertical: 6,
+    paddingHorizontal: 10,
+    backgroundColor: "#102b3b",
+    borderWidth: 1,
+    borderColor: "#23546e",
+    borderRadius: 6
+  },
+  filterActive: {
+    backgroundColor: "#1d6977",
+    borderColor: theme.colors.accent
+  },
+  filterText: {
+    color: theme.colors.text,
+    fontSize: 11,
+    fontWeight: "700"
+  },
+  headerRow: {
+    flexDirection: "row",
+    backgroundColor: "#163f57",
+    borderWidth: 1,
+    borderColor: "#23546e",
+    paddingVertical: 8,
+    marginTop: 10
+  },
+  headerText: {
+    color: theme.colors.text,
+    fontSize: 11,
+    fontWeight: "800",
+    textTransform: "uppercase"
+  },
+  dataRow: {
+    flexDirection: "row",
+    borderLeftWidth: 1,
+    borderRightWidth: 1,
+    borderBottomWidth: 1,
+    borderColor: "#23546e",
+    paddingVertical: 10,
+    backgroundColor: "#0f2a38"
+  },
+  dataRowOpen: {
+    backgroundColor: "#123246"
+  },
+  cell: {
+    paddingHorizontal: 6
+  },
+  cellText: {
+    color: theme.colors.text,
+    fontSize: 11,
+    fontWeight: "600"
+  },
+  cellCommodity: {
+    flex: 1.4,
+    minWidth: 90
+  },
+  cellPattern: {
+    flex: 1.5,
+    minWidth: 110
+  },
+  cellCount: {
+    flex: 1,
+    minWidth: 82,
+    textAlign: "center"
+  },
+  cellRate: {
+    flex: 1.1,
+    minWidth: 92,
+    textAlign: "center"
+  },
+  cellRR: {
+    flex: 0.7,
+    minWidth: 46,
+    textAlign: "right"
+  },
+  detailBox: {
+    padding: 12,
+    backgroundColor: "#0b2231",
+    borderWidth: 1,
+    borderColor: "#2d7a8b",
+    marginBottom: 8
+  },
+  detailHeader: {
+    color: theme.colors.text,
+    fontSize: 12,
+    fontWeight: "800"
+  },
+  detailMeta: {
+    color: theme.colors.muted,
+    fontSize: 11,
+    marginTop: 4,
+    marginBottom: 10
+  },
+  detailTableHeader: {
+    flexDirection: "row",
+    backgroundColor: "#163f57",
+    paddingVertical: 6
+  },
+  detailHeaderText: {
+    color: theme.colors.text,
+    fontSize: 10,
+    fontWeight: "800",
+    textTransform: "uppercase"
+  },
+  detailRow: {
+    flexDirection: "row",
+    borderBottomWidth: 1,
+    borderBottomColor: "#1f4358",
+    paddingVertical: 6
+  },
+  detailCell: {
+    paddingHorizontal: 4
+  },
+  detailText: {
+    color: theme.colors.text,
+    fontSize: 11
+  },
+  detailDate: {
+    flex: 1.8,
+    minWidth: 110
+  },
+  detailDir: {
+    flex: 0.9,
+    minWidth: 60
+  },
+  detailEntry: {
+    flex: 0.9,
+    minWidth: 56,
+    textAlign: "right"
+  },
+  detailRR: {
+    flex: 0.6,
+    minWidth: 44,
+    textAlign: "right"
+  },
+  detailOutcome: {
+    flex: 0.9,
+    minWidth: 60,
+    textAlign: "right",
+    fontWeight: "700"
+  },
+  detailFootnote: {
+    color: theme.colors.muted,
+    fontSize: 10,
+    marginTop: 8
+  },
+  muted: {
+    color: theme.colors.muted,
+    marginTop: 12
+  },
+  source: {
+    color: theme.colors.muted,
+    fontSize: 10,
+    marginTop: 12
+  }
 });
