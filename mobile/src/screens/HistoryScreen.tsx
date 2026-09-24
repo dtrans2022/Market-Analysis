@@ -1,234 +1,353 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { fetchMarketHistory } from "../api/client";
 import { SectionCard } from "../components/SectionCard";
 import { theme } from "../theme";
-import dataset from "../data/commodity-pattern-history.json";
+import {
+  CandlestickOutcomeDetail,
+  CandlestickOutcomeSummary,
+  MarketHistoryResponse,
+  MarketHistoryTimeframe
+} from "../types";
 
-type Detail = {
-  date: string;
-  timestamp: number;
-  timeframe?: string;
-  direction: "bullish" | "bearish";
-  entry: number;
-  zonePrice?: number;
-  reward: number;
-  risk: number;
-  riskReward: number;
-  success: boolean;
+const CURRENCY_PAIRS = [
+  "AUD/USD", "AUD/CHF", "AUD/JPY", "AUD/NZD", "CAD/JPY", "EUR/AUD", "EUR/CAD", "EUR/GBP", "EUR/JPY",
+  "EUR/NZD", "EUR/USD", "GBP/AUD", "GBP/NZD", "GBP/USD", "NZD/JPY", "USD/CAD", "USD/CHF", "USD/JPY"
+];
+
+const REQUESTED_TIMEFRAMES: MarketHistoryTimeframe[] = ["1hour", "4hour", "1Day"];
+
+const TIMEFRAME_LABEL: Record<MarketHistoryTimeframe, string> = {
+  "15minute": "15m",
+  "30minute": "30m",
+  "1hour": "1h",
+  "4hour": "4h",
+  "12hour": "12h",
+  "1Day": "1D",
+  "1Week": "1W"
 };
 
-type PatternRecord = {
-  commodity: string;
-  symbol: string;
-  timeframe: string;
+type DetailFilter = "occurred" | "successful" | "unsuccessful" | "neutral";
+
+type MergedRow = {
+  pair: string;
   pattern: string;
-  zone: "support" | "resistance";
-  occurrences: number;
-  successes: number;
-  failures: number;
-  successRate: number;
-  avgRiskReward: number;
-  avgReward: number;
-  avgRisk: number;
-  details: Detail[];
+  formations: number;
+  successful: number;
+  unsuccessful: number;
+  neutral: number;
+  atSupportCount: number;
+  atResistanceCount: number;
+  perTimeframe: Partial<Record<MarketHistoryTimeframe, CandlestickOutcomeSummary>>;
+  details: Array<CandlestickOutcomeDetail & { timeframe: MarketHistoryTimeframe }>;
 };
-
-type Dataset = {
-  generatedAt: string;
-  source: string;
-  timeframes: string[];
-  commodities: string[];
-  records: PatternRecord[];
-};
-
-const typed = dataset as Dataset;
 
 function labelPattern(pattern: string) {
-  return pattern.replace(/-/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
+  return pattern.replaceAll("-", " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
-function successTone(rate: number) {
-  if (rate >= 0.7) return theme.colors.positive;
-  if (rate >= 0.5) return theme.colors.warning;
-  return theme.colors.negative;
+function volumeLabel(detail: CandlestickOutcomeDetail) {
+  return detail.volumeRatio == null
+    ? "Volume unavailable"
+    : `${detail.volumeRatio}x of prior 20-bar average`;
+}
+
+function formatCandleSession(timestamp: number, timeframe: MarketHistoryTimeframe) {
+  const date = new Date(timestamp * 1000);
+  const includeTime = timeframe !== "1Day" && timeframe !== "1Week";
+  const utcOpts: Intl.DateTimeFormatOptions = includeTime
+    ? { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", timeZone: "UTC", hour12: false }
+    : { year: "numeric", month: "2-digit", day: "2-digit", timeZone: "UTC" };
+  const sydOpts: Intl.DateTimeFormatOptions = includeTime
+    ? { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", timeZone: "Australia/Sydney", hour12: false }
+    : { year: "numeric", month: "2-digit", day: "2-digit", timeZone: "Australia/Sydney" };
+  const utc = new Intl.DateTimeFormat("en-CA", utcOpts).format(date).replace(",", "");
+  const sydney = new Intl.DateTimeFormat("en-CA", sydOpts).format(date).replace(",", "");
+  return `Source UTC ${utc} | Sydney ${sydney}`;
+}
+
+function outcomeColor(outcome: CandlestickOutcomeDetail["outcome"]) {
+  if (outcome === "successful") return theme.colors.positive;
+  if (outcome === "unsuccessful") return theme.colors.negative;
+  return theme.colors.warning;
+}
+
+function movedColor(direction: CandlestickOutcomeDetail["directionMoved"] | undefined) {
+  if (direction === "up") return theme.colors.positive;
+  if (direction === "down") return theme.colors.negative;
+  return theme.colors.muted;
+}
+
+function decimalsFor(pair: string) {
+  return /JPY$/.test(pair) ? 3 : 5;
+}
+
+function inferDirectionMoved(detail: CandlestickOutcomeDetail): "up" | "down" | "flat" {
+  if (detail.directionMoved) return detail.directionMoved;
+  if (detail.followThroughClose > detail.entryClose) return "up";
+  if (detail.followThroughClose < detail.entryClose) return "down";
+  return "flat";
+}
+
+function mergeRows(history: MarketHistoryResponse | null): MergedRow[] {
+  if (!history) return [];
+  const map = new Map<string, MergedRow>();
+  for (const pair of CURRENCY_PAIRS) {
+    const perPair = history.candlestickOutcomes[pair];
+    if (!perPair) continue;
+    for (const timeframe of REQUESTED_TIMEFRAMES) {
+      const summaries = perPair[timeframe];
+      if (!summaries) continue;
+      for (const summary of summaries) {
+        if (summary.formations <= 0) continue;
+        const key = `${pair}::${summary.pattern}`;
+        let row = map.get(key);
+        if (!row) {
+          row = {
+            pair,
+            pattern: summary.pattern,
+            formations: 0,
+            successful: 0,
+            unsuccessful: 0,
+            neutral: 0,
+            atSupportCount: 0,
+            atResistanceCount: 0,
+            perTimeframe: {},
+            details: []
+          };
+          map.set(key, row);
+        }
+        row.formations += summary.formations;
+        row.successful += summary.expectedDirectionCount;
+        row.unsuccessful += summary.oppositeDirectionCount;
+        row.neutral += summary.neutralOutcomeCount;
+        row.atSupportCount += summary.atSupportCount;
+        row.atResistanceCount += summary.atResistanceCount;
+        row.perTimeframe[timeframe] = summary;
+        for (const detail of summary.details) {
+          row.details.push({ ...detail, timeframe });
+        }
+      }
+    }
+  }
+  return Array.from(map.values());
 }
 
 export function HistoryScreen() {
-  const [timeframe, setTimeframe] = useState<string>("1D");
-  const [commodity, setCommodity] = useState<string | null>(null);
-  const [expanded, setExpanded] = useState<string | null>(null);
+  const [history, setHistory] = useState<MarketHistoryResponse | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [selectedPair, setSelectedPair] = useState<string | null>(null);
+  const [selectedTimeframe, setSelectedTimeframe] = useState<MarketHistoryTimeframe | "all">("all");
+  const [detail, setDetail] = useState<{ row: MergedRow; filter: DetailFilter } | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function load() {
+      setLoading(true);
+      try {
+        const response = await fetchMarketHistory(CURRENCY_PAIRS, REQUESTED_TIMEFRAMES, 5);
+        if (!cancelled) setHistory(response);
+      } catch (loadError) {
+        if (!cancelled) {
+          setError(loadError instanceof Error ? loadError.message : "Unable to load candle history");
+        }
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    }
+    void load();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const rows = useMemo(() => {
-    return typed.records
-      .filter((row) => row.timeframe === timeframe)
-      .filter((row) => !commodity || row.commodity === commodity)
-      .sort((a, b) => {
-        if (b.successRate !== a.successRate) return b.successRate - a.successRate;
-        return b.occurrences - a.occurrences;
-      });
-  }, [timeframe, commodity]);
+    const merged = mergeRows(history);
+    return merged
+      .filter((row) => !selectedPair || row.pair === selectedPair)
+      .filter((row) => selectedTimeframe === "all" || Boolean(row.perTimeframe[selectedTimeframe]))
+      .sort((a, b) => b.formations - a.formations || a.pair.localeCompare(b.pair));
+  }, [history, selectedPair, selectedTimeframe]);
 
   return (
     <View>
       <SectionCard
-        title="Commodity Candle Pattern History"
-        subtitle="Live Yahoo data | last 3 years (1D) and 730 days (1h/4h) | evaluated at swing support/resistance zones"
+        title="Forex Candlestick Pattern History"
+        subtitle="Five-year outcomes across 1h, 4h and 1Day at swing support/resistance"
       >
         <Text style={styles.intro}>
-          Success = price closed in the expected direction within the lookahead window. R:R = average reward / adverse
-          excursion, capped at 10.0. Only patterns with 3+ occurrences are shown. Expand a row to see each occurrence,
-          the timeframe (TF) it fired on, and the actual support/resistance level (Zone) the candle was touching so you
-          can verify it against your chart.
+          Patterns are counted only when they form at a confirmed swing support/resistance level (pivot detected BEFORE
+          the candle, tight tolerance). Successful = price moved in the pattern&apos;s expected direction within the
+          lookahead window; Unsuccessful = it moved against; Neutral = it stayed flat. Each detail row is tagged with
+          the timeframe it fired on (TF) and the actual support/resistance price (Zone) that was touched, so you can
+          verify against your chart.
         </Text>
 
         <Text style={styles.groupLabel}>Timeframe</Text>
         <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.filters}>
           <View style={styles.filterRow}>
-            {typed.timeframes.map((tf) => (
-              <Pressable
-                key={tf}
-                onPress={() => setTimeframe(tf)}
-                style={[styles.filter, timeframe === tf && styles.filterActive]}
-              >
-                <Text style={styles.filterText}>{tf}</Text>
-              </Pressable>
-            ))}
-          </View>
-        </ScrollView>
-
-        <Text style={styles.groupLabel}>Commodity</Text>
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.filters}>
-          <View style={styles.filterRow}>
             <Pressable
-              onPress={() => setCommodity(null)}
-              style={[styles.filter, commodity === null && styles.filterActive]}
+              onPress={() => setSelectedTimeframe("all")}
+              style={[styles.filter, selectedTimeframe === "all" && styles.filterActive]}
             >
               <Text style={styles.filterText}>All</Text>
             </Pressable>
-            {typed.commodities.map((name) => (
+            {REQUESTED_TIMEFRAMES.map((tf) => (
               <Pressable
-                key={name}
-                onPress={() => setCommodity(name)}
-                style={[styles.filter, commodity === name && styles.filterActive]}
+                key={tf}
+                onPress={() => setSelectedTimeframe(tf)}
+                style={[styles.filter, selectedTimeframe === tf && styles.filterActive]}
               >
-                <Text style={styles.filterText}>{name}</Text>
+                <Text style={styles.filterText}>{TIMEFRAME_LABEL[tf]}</Text>
               </Pressable>
             ))}
           </View>
         </ScrollView>
 
-        <View style={styles.headerRow}>
-          <Text style={[styles.cell, styles.cellCommodity, styles.headerText]}>Commodity</Text>
-          <Text style={[styles.cell, styles.cellPattern, styles.headerText]}>Candle Pattern</Text>
-          <Text style={[styles.cell, styles.cellCount, styles.headerText]}>Occurred (S/R)</Text>
-          <Text style={[styles.cell, styles.cellRate, styles.headerText]}>Success %</Text>
-          <Text style={[styles.cell, styles.cellRR, styles.headerText]}>R:R</Text>
+        <Text style={styles.groupLabel}>Currency pair</Text>
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.filters}>
+          <View style={styles.filterRow}>
+            <Pressable
+              onPress={() => setSelectedPair(null)}
+              style={[styles.filter, !selectedPair && styles.filterActive]}
+            >
+              <Text style={styles.filterText}>All pairs</Text>
+            </Pressable>
+            {CURRENCY_PAIRS.map((pair) => (
+              <Pressable
+                key={pair}
+                onPress={() => setSelectedPair(pair)}
+                style={[styles.filter, selectedPair === pair && styles.filterActive]}
+              >
+                <Text style={styles.filterText}>{pair}</Text>
+              </Pressable>
+            ))}
+          </View>
+        </ScrollView>
+
+        {loading ? <Text style={styles.muted}>Loading five-year candle history for all pairs...</Text> : null}
+        {error ? <Text style={styles.error}>{error}</Text> : null}
+
+        <View style={styles.headerBar}>
+          <Text style={[styles.cell, styles.pattern, styles.headerText]}>Candle pattern</Text>
+          <Text style={[styles.cell, styles.pair, styles.headerText]}>Pair</Text>
+          <Text style={[styles.cell, styles.count, styles.headerText]}>Occurred</Text>
+          <Text style={[styles.cell, styles.count, styles.headerText]}>Successful</Text>
+          <Text style={[styles.cell, styles.count, styles.headerText]}>Unsuccessful</Text>
+          <Text style={[styles.cell, styles.count, styles.headerText]}>Neutral</Text>
+          <Text style={[styles.cell, styles.tfList, styles.headerText]}>TFs</Text>
         </View>
 
-        {rows.length === 0 ? (
-          <Text style={styles.muted}>No patterns matched the current filters.</Text>
-        ) : null}
-
         {rows.map((row) => {
-          const rowKey = `${row.commodity}-${row.pattern}-${row.zone}-${row.timeframe}`;
-          const isOpen = expanded === rowKey;
-          const successPct = (row.successRate * 100).toFixed(1);
-          const failurePct = (100 - row.successRate * 100).toFixed(1);
+          const isSelected = detail?.row.pair === row.pair && detail.row.pattern === row.pattern;
+          const activeTfs = REQUESTED_TIMEFRAMES.filter((tf) => Boolean(row.perTimeframe[tf]))
+            .map((tf) => TIMEFRAME_LABEL[tf])
+            .join(" / ");
           return (
-            <View key={rowKey}>
-              <Pressable
-                onPress={() => setExpanded(isOpen ? null : rowKey)}
-                style={[styles.dataRow, isOpen && styles.dataRowOpen]}
-              >
-                <Text style={[styles.cell, styles.cellCommodity, styles.cellText]} numberOfLines={2}>
-                  {row.commodity}
-                </Text>
-                <Text style={[styles.cell, styles.cellPattern, styles.cellText]} numberOfLines={2}>
-                  {labelPattern(row.pattern)}
-                </Text>
-                <Text style={[styles.cell, styles.cellCount, styles.cellText]}>
-                  {row.occurrences} ({row.zone === "support" ? "S" : "R"})
-                </Text>
-                <Text style={[styles.cell, styles.cellRate, styles.cellText, { color: successTone(row.successRate) }]}>
-                  {successPct}% / {failurePct}%
-                </Text>
-                <Text style={[styles.cell, styles.cellRR, styles.cellText]}>{row.avgRiskReward.toFixed(2)}</Text>
-              </Pressable>
-              {isOpen ? (
-                <View style={styles.detailBox}>
-                  <Text style={styles.detailHeader}>
-                    {row.commodity} | {labelPattern(row.pattern)} @ {row.zone.toUpperCase()} | {row.timeframe}
-                  </Text>
+            <View key={`${row.pair}-${row.pattern}`}>
+              <View style={styles.row}>
+                <Pressable onPress={() => setDetail({ row, filter: "occurred" })} style={[styles.cell, styles.pattern]}>
+                  <Text style={styles.patternText}>{labelPattern(row.pattern)}</Text>
+                </Pressable>
+                <Text style={[styles.cell, styles.pair, styles.cellText]}>{row.pair}</Text>
+                <Pressable
+                  onPress={() => setDetail({ row, filter: "occurred" })}
+                  style={[styles.cell, styles.count, styles.countButton]}
+                >
+                  <Text style={styles.countLink}>{row.formations}</Text>
+                </Pressable>
+                <Pressable
+                  onPress={() => setDetail({ row, filter: "successful" })}
+                  style={[styles.cell, styles.count, styles.countButton]}
+                >
+                  <Text style={[styles.countLink, styles.success]}>{row.successful}</Text>
+                </Pressable>
+                <Pressable
+                  onPress={() => setDetail({ row, filter: "unsuccessful" })}
+                  style={[styles.cell, styles.count, styles.countButton]}
+                >
+                  <Text style={[styles.countLink, styles.failure]}>{row.unsuccessful}</Text>
+                </Pressable>
+                <Pressable
+                  onPress={() => setDetail({ row, filter: "neutral" })}
+                  style={[styles.cell, styles.count, styles.countButton]}
+                >
+                  <Text style={[styles.countLink, styles.neutral]}>{row.neutral}</Text>
+                </Pressable>
+                <Text style={[styles.cell, styles.tfList, styles.tfText]}>{activeTfs || "-"}</Text>
+              </View>
+
+              {isSelected && detail ? (
+                <View style={styles.detail}>
+                  <View style={styles.detailHead}>
+                    <Text style={styles.detailTitle}>
+                      {detail.filter.toUpperCase()} | {detail.row.pair} | {labelPattern(detail.row.pattern)}
+                    </Text>
+                    <Pressable onPress={() => setDetail(null)}>
+                      <Text style={styles.close}>Close</Text>
+                    </Pressable>
+                  </View>
                   <Text style={styles.detailMeta}>
-                    Successes {row.successes} / Failures {row.failures} | Avg reward {row.avgReward} | Avg risk {row.avgRisk}
+                    Occurred {detail.row.formations} | Successful {detail.row.successful} | Unsuccessful{" "}
+                    {detail.row.unsuccessful} | Neutral {detail.row.neutral} | Support {detail.row.atSupportCount} |
+                    Resistance {detail.row.atResistanceCount}
                   </Text>
                   <Text style={styles.detailLegend}>
-                    Each row shows the timeframe the signal fired on and the {row.zone === "support" ? "support" : "resistance"} price
-                    level (Zone) that the candle was touching within the zone tolerance. Compare Entry vs Zone on your chart.
+                    TF = timeframe the signal fired on (1h / 4h / 1D). Zone = actual pivot price the candle touched.
+                    Moved = direction price ultimately went during the lookahead window.
                   </Text>
-                  <View style={styles.detailTableHeader}>
-                    <Text style={[styles.detailCell, styles.detailDate, styles.detailHeaderText]}>Date (UTC)</Text>
-                    <Text style={[styles.detailCell, styles.detailTf, styles.detailHeaderText]}>TF</Text>
-                    <Text style={[styles.detailCell, styles.detailDir, styles.detailHeaderText]}>Direction</Text>
-                    <Text style={[styles.detailCell, styles.detailEntry, styles.detailHeaderText]}>Entry</Text>
-                    <Text style={[styles.detailCell, styles.detailZone, styles.detailHeaderText]}>Zone</Text>
-                    <Text style={[styles.detailCell, styles.detailRR, styles.detailHeaderText]}>R:R</Text>
-                    <Text style={[styles.detailCell, styles.detailOutcome, styles.detailHeaderText]}>Outcome</Text>
-                  </View>
-                  {row.details.map((detail) => (
-                    <View key={`${detail.timestamp}-${detail.direction}`} style={styles.detailRow}>
-                      <Text style={[styles.detailCell, styles.detailDate, styles.detailText]}>{detail.date}</Text>
-                      <Text style={[styles.detailCell, styles.detailTf, styles.detailText]}>
-                        {detail.timeframe ?? row.timeframe}
-                      </Text>
-                      <Text style={[styles.detailCell, styles.detailDir, styles.detailText]}>{detail.direction}</Text>
-                      <Text style={[styles.detailCell, styles.detailEntry, styles.detailText]}>
-                        {detail.entry.toFixed(2)}
-                      </Text>
-                      <Text style={[styles.detailCell, styles.detailZone, styles.detailText]}>
-                        {typeof detail.zonePrice === "number" ? detail.zonePrice.toFixed(2) : "—"}
-                      </Text>
-                      <Text style={[styles.detailCell, styles.detailRR, styles.detailText]}>
-                        {detail.riskReward.toFixed(2)}
-                      </Text>
-                      <Text
-                        style={[
-                          styles.detailCell,
-                          styles.detailOutcome,
-                          styles.detailText,
-                          { color: detail.success ? theme.colors.positive : theme.colors.negative }
-                        ]}
-                      >
-                        {detail.success ? "Success" : "Fail"}
-                      </Text>
-                    </View>
-                  ))}
-                  <Text style={styles.detailFootnote}>
-                    Showing latest {row.details.length} of {row.occurrences} occurrences. Zone shows the pivot-based
-                    {row.zone === "support" ? " support" : " resistance"} level (confirmed before the candle) that the bar was within
-                    tolerance of.
-                  </Text>
+                  <ScrollView style={styles.detailList} nestedScrollEnabled>
+                    {detail.row.details
+                      .filter((item) =>
+                        selectedTimeframe === "all" ? true : item.timeframe === selectedTimeframe
+                      )
+                      .filter((item) => detail.filter === "occurred" || item.outcome === detail.filter)
+                      .sort((a, b) => b.timestamp - a.timestamp)
+                      .slice(0, 50)
+                      .map((item) => {
+                        const decimals = decimalsFor(detail.row.pair);
+                        const moved = inferDirectionMoved(item);
+                        const zoneLabel =
+                          typeof item.zonePrice === "number" && item.zonePrice > 0
+                            ? item.zonePrice.toFixed(decimals)
+                            : "-";
+                        return (
+                          <View key={`${item.timeframe}-${item.timestamp}-${item.outcome}`} style={styles.detailRow}>
+                            <View style={styles.detailHeaderRow}>
+                              <Text style={styles.tfBadge}>TF {TIMEFRAME_LABEL[item.timeframe]}</Text>
+                              <Text style={styles.detailDate}>{formatCandleSession(item.timestamp, item.timeframe)}</Text>
+                              <Text style={[styles.detailOutcome, { color: outcomeColor(item.outcome) }]}>
+                                {item.outcome.toUpperCase()}
+                              </Text>
+                            </View>
+                            <Text style={styles.detailText}>{item.note}</Text>
+                            <Text style={styles.detailText}>
+                              At {item.formedAt}; Zone {zoneLabel}; expected {item.expectedDirection};{" "}
+                              <Text style={{ color: movedColor(moved) }}>moved {moved}</Text>; close{" "}
+                              {item.entryClose.toFixed(decimals)} to {item.followThroughClose.toFixed(decimals)};{" "}
+                              {volumeLabel(item)}.
+                            </Text>
+                          </View>
+                        );
+                      })}
+                  </ScrollView>
                 </View>
               ) : null}
             </View>
           );
         })}
 
-        <Text style={styles.source}>
-          {typed.source} | Data generated {new Date(typed.generatedAt).toLocaleString()}
-        </Text>
+        {!loading && rows.length === 0 ? (
+          <Text style={styles.muted}>No patterns matched the current filters.</Text>
+        ) : null}
       </SectionCard>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  intro: {
-    color: theme.colors.muted,
-    fontSize: 12,
-    lineHeight: 17,
-    marginBottom: 10
-  },
+  intro: { color: theme.colors.muted, fontSize: 12, lineHeight: 17, marginBottom: 6 },
   groupLabel: {
     color: theme.colors.muted,
     fontSize: 11,
@@ -237,13 +356,8 @@ const styles = StyleSheet.create({
     textTransform: "uppercase",
     marginTop: 6
   },
-  filters: {
-    marginVertical: 6
-  },
-  filterRow: {
-    flexDirection: "row",
-    gap: 6
-  },
+  filters: { marginVertical: 6 },
+  filterRow: { flexDirection: "row", gap: 6 },
   filter: {
     paddingVertical: 6,
     paddingHorizontal: 10,
@@ -252,16 +366,9 @@ const styles = StyleSheet.create({
     borderColor: "#23546e",
     borderRadius: 6
   },
-  filterActive: {
-    backgroundColor: "#1d6977",
-    borderColor: theme.colors.accent
-  },
-  filterText: {
-    color: theme.colors.text,
-    fontSize: 11,
-    fontWeight: "700"
-  },
-  headerRow: {
+  filterActive: { backgroundColor: "#1d6977", borderColor: theme.colors.accent },
+  filterText: { color: theme.colors.text, fontSize: 11, fontWeight: "700" },
+  headerBar: {
     flexDirection: "row",
     backgroundColor: "#163f57",
     borderWidth: 1,
@@ -269,150 +376,64 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
     marginTop: 10
   },
-  headerText: {
-    color: theme.colors.text,
-    fontSize: 11,
-    fontWeight: "800",
-    textTransform: "uppercase"
-  },
-  dataRow: {
+  headerText: { color: theme.colors.text, fontSize: 11, fontWeight: "800", textTransform: "uppercase" },
+  row: {
     flexDirection: "row",
     borderLeftWidth: 1,
     borderRightWidth: 1,
     borderBottomWidth: 1,
     borderColor: "#23546e",
-    paddingVertical: 10,
+    paddingVertical: 9,
     backgroundColor: "#0f2a38"
   },
-  dataRowOpen: {
-    backgroundColor: "#123246"
-  },
-  cell: {
-    paddingHorizontal: 6
-  },
-  cellText: {
-    color: theme.colors.text,
-    fontSize: 11,
-    fontWeight: "600"
-  },
-  cellCommodity: {
-    flex: 1.4,
-    minWidth: 90
-  },
-  cellPattern: {
-    flex: 1.5,
-    minWidth: 110
-  },
-  cellCount: {
-    flex: 1,
-    minWidth: 82,
-    textAlign: "center"
-  },
-  cellRate: {
-    flex: 1.1,
-    minWidth: 92,
-    textAlign: "center"
-  },
-  cellRR: {
-    flex: 0.7,
-    minWidth: 46,
-    textAlign: "right"
-  },
-  detailBox: {
-    padding: 12,
-    backgroundColor: "#0b2231",
-    borderWidth: 1,
-    borderColor: "#2d7a8b",
-    marginBottom: 8
-  },
-  detailHeader: {
-    color: theme.colors.text,
+  cell: { paddingHorizontal: 4 },
+  cellText: { color: theme.colors.text, fontSize: 11 },
+  pattern: { flex: 1.45, minWidth: 108 },
+  pair: { flex: 0.85, minWidth: 62 },
+  count: { flex: 0.62, minWidth: 48, textAlign: "center" },
+  countButton: { minHeight: 28, justifyContent: "center", backgroundColor: "#123246", borderRadius: 3, marginHorizontal: 1 },
+  tfList: { flex: 0.9, minWidth: 64, textAlign: "center" },
+  tfText: { color: theme.colors.accent, fontSize: 11, fontWeight: "700", textAlign: "center" },
+  patternText: { color: theme.colors.text, fontSize: 11, fontWeight: "600" },
+  countLink: {
+    color: theme.colors.accent,
     fontSize: 12,
-    fontWeight: "800"
+    fontWeight: "800",
+    textAlign: "center",
+    textDecorationLine: "underline"
   },
-  detailMeta: {
-    color: theme.colors.muted,
-    fontSize: 11,
-    marginTop: 4,
-    marginBottom: 6
+  success: { color: theme.colors.positive },
+  failure: { color: theme.colors.negative },
+  neutral: { color: theme.colors.warning },
+  detail: {
+    marginTop: 6,
+    marginBottom: 8,
+    padding: 10,
+    backgroundColor: "#102b3b",
+    borderWidth: 1,
+    borderColor: "#2d7a8b"
   },
-  detailLegend: {
-    color: theme.colors.muted,
-    fontSize: 10,
-    lineHeight: 14,
-    marginBottom: 8
-  },
-  detailTableHeader: {
-    flexDirection: "row",
-    backgroundColor: "#163f57",
-    paddingVertical: 6
-  },
-  detailHeaderText: {
-    color: theme.colors.text,
+  detailHead: { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
+  detailTitle: { color: theme.colors.text, fontSize: 13, fontWeight: "800" },
+  close: { color: theme.colors.accent, fontSize: 12, fontWeight: "700" },
+  detailMeta: { color: theme.colors.muted, fontSize: 11, marginTop: 6 },
+  detailLegend: { color: theme.colors.muted, fontSize: 10, marginTop: 4, marginBottom: 8, lineHeight: 14 },
+  detailList: { maxHeight: 340 },
+  detailRow: { borderTopWidth: 1, borderTopColor: "#23546e", marginTop: 8, paddingTop: 8 },
+  detailHeaderRow: { flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: 6 },
+  tfBadge: {
+    color: "#0b2231",
+    backgroundColor: theme.colors.accent,
     fontSize: 10,
     fontWeight: "800",
-    textTransform: "uppercase"
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+    overflow: "hidden"
   },
-  detailRow: {
-    flexDirection: "row",
-    borderBottomWidth: 1,
-    borderBottomColor: "#1f4358",
-    paddingVertical: 6
-  },
-  detailCell: {
-    paddingHorizontal: 4
-  },
-  detailText: {
-    color: theme.colors.text,
-    fontSize: 11
-  },
-  detailDate: {
-    flex: 1.6,
-    minWidth: 108
-  },
-  detailTf: {
-    flex: 0.5,
-    minWidth: 34,
-    textAlign: "center",
-    fontWeight: "700"
-  },
-  detailDir: {
-    flex: 0.9,
-    minWidth: 58
-  },
-  detailEntry: {
-    flex: 0.8,
-    minWidth: 52,
-    textAlign: "right"
-  },
-  detailZone: {
-    flex: 0.8,
-    minWidth: 52,
-    textAlign: "right"
-  },
-  detailRR: {
-    flex: 0.55,
-    minWidth: 40,
-    textAlign: "right"
-  },
-  detailOutcome: {
-    flex: 0.85,
-    minWidth: 56,
-    textAlign: "right",
-    fontWeight: "700"
-  },
-  detailFootnote: {
-    color: theme.colors.muted,
-    fontSize: 10,
-    marginTop: 8
-  },
-  muted: {
-    color: theme.colors.muted,
-    marginTop: 12
-  },
-  source: {
-    color: theme.colors.muted,
-    fontSize: 10,
-    marginTop: 12
-  }
+  detailDate: { color: theme.colors.text, fontSize: 11, fontWeight: "700", flex: 1 },
+  detailOutcome: { fontSize: 11, fontWeight: "800" },
+  detailText: { color: theme.colors.muted, fontSize: 11, lineHeight: 16, marginTop: 2 },
+  muted: { color: theme.colors.muted, marginVertical: 8 },
+  error: { color: theme.colors.negative, marginVertical: 8 }
 });

@@ -796,7 +796,50 @@ const CANDLESTICK_PATTERNS = [
   "falling-window", "three-inside-up", "three-inside-down", "three-outside-up", "three-outside-down"
 ];
 
-function summarizeCandlestickOutcomes(candles) {
+function timeframeOutcomeParams(timeframe) {
+  switch (timeframe) {
+    case "15minute": return { pivotWindow: 12, lookback: 240, zoneTolerancePct: 0.0006, lookahead: 12, flatToleranceMultiplier: 0.08 };
+    case "30minute": return { pivotWindow: 12, lookback: 200, zoneTolerancePct: 0.0009, lookahead: 8, flatToleranceMultiplier: 0.08 };
+    case "1hour": return { pivotWindow: 12, lookback: 200, zoneTolerancePct: 0.0012, lookahead: 8, flatToleranceMultiplier: 0.08 };
+    case "4hour": return { pivotWindow: 8, lookback: 160, zoneTolerancePct: 0.002, lookahead: 6, flatToleranceMultiplier: 0.1 };
+    case "12hour": return { pivotWindow: 6, lookback: 140, zoneTolerancePct: 0.0025, lookahead: 5, flatToleranceMultiplier: 0.12 };
+    case "1Day": return { pivotWindow: 5, lookback: 120, zoneTolerancePct: 0.003, lookahead: 5, flatToleranceMultiplier: 0.15 };
+    case "1Week": return { pivotWindow: 4, lookback: 60, zoneTolerancePct: 0.005, lookahead: 4, flatToleranceMultiplier: 0.2 };
+    default: return { pivotWindow: 5, lookback: 120, zoneTolerancePct: 0.003, lookahead: 5, flatToleranceMultiplier: 0.15 };
+  }
+}
+
+function confirmedOutcomePivots(candles, window) {
+  const supports = [];
+  const resistances = [];
+  for (let p = window; p < candles.length - window; p += 1) {
+    const segment = candles.slice(p - window, p + window + 1);
+    const pivot = candles[p];
+    const confirmIndex = p + window;
+    if (pivot.l === Math.min(...segment.map((c) => c.l))) supports.push({ confirmIndex, price: pivot.l });
+    if (pivot.h === Math.max(...segment.map((c) => c.h))) resistances.push({ confirmIndex, price: pivot.h });
+  }
+  return { supports, resistances };
+}
+
+function nearestPivotZone(price, zones, tolerancePct, currentIndex, lookback) {
+  const minConfirm = currentIndex - lookback;
+  let bestPrice = null;
+  let bestDist = Number.POSITIVE_INFINITY;
+  for (const zone of zones) {
+    if (zone.confirmIndex >= currentIndex) break;
+    if (zone.confirmIndex < minConfirm) continue;
+    if (zone.price <= 0) continue;
+    const dist = Math.abs(price - zone.price) / zone.price;
+    if (dist <= tolerancePct && dist < bestDist) {
+      bestDist = dist;
+      bestPrice = zone.price;
+    }
+  }
+  return bestPrice;
+}
+
+function summarizeCandlestickOutcomes(candles, timeframe = "1Day") {
   const outcomes = new Map(CANDLESTICK_PATTERNS.map((pattern) => [pattern, {
     pattern,
     formations: 0,
@@ -809,15 +852,19 @@ function summarizeCandlestickOutcomes(candles) {
     details: []
   }]));
 
-  for (let index = 30; index < candles.length - 5; index += 1) {
+  const params = timeframeOutcomeParams(timeframe);
+  const { supports, resistances } = confirmedOutcomePivots(candles, params.pivotWindow);
+
+  for (let index = Math.max(30, params.pivotWindow + 2); index < candles.length - params.lookahead; index += 1) {
     const candle = candles[index];
-    const levels = candles.slice(Math.max(0, index - 50), index);
-    const support = Math.min(...levels.map((item) => item.l));
-    const resistance = Math.max(...levels.map((item) => item.h));
-    const averageRange = levels.reduce((sum, item) => sum + (item.h - item.l), 0) / levels.length;
-    const tolerance = Math.max(averageRange * 1.5, candle.c * 0.0015);
-    const isAtSupport = candle.l <= support + tolerance;
-    const isAtResistance = candle.h >= resistance - tolerance;
+    const supportPrice =
+      nearestPivotZone(candle.l, supports, params.zoneTolerancePct, index, params.lookback)
+      ?? nearestPivotZone(candle.c, supports, params.zoneTolerancePct, index, params.lookback);
+    const resistancePrice =
+      nearestPivotZone(candle.h, resistances, params.zoneTolerancePct, index, params.lookback)
+      ?? nearestPivotZone(candle.c, resistances, params.zoneTolerancePct, index, params.lookback);
+    const isAtSupport = supportPrice !== null;
+    const isAtResistance = resistancePrice !== null;
     if (!isAtSupport && !isAtResistance) continue;
 
     const slopeBase = candles[Math.max(0, index - 10)].c;
@@ -830,24 +877,47 @@ function summarizeCandlestickOutcomes(candles) {
     summary.atSupportCount += Number(isAtSupport);
     summary.atResistanceCount += Number(isAtResistance);
 
-    const futureClose = candles[index + 5].c;
-    const outcomeTolerance = Math.max((candle.h - candle.l) * 0.1, candle.c * 0.0001);
-    const outcome = detection.bias === "neutral" || Math.abs(futureClose - candle.c) <= outcomeTolerance
-      ? "neutral"
-      : (detection.bias === "up" && futureClose > candle.c) || (detection.bias === "down" && futureClose < candle.c)
-        ? "successful"
-        : "unsuccessful";
-    if (outcome === "neutral") {
-      summary.neutralOutcomeCount += 1;
-    } else if (outcome === "successful") {
-      summary.expectedDirectionCount += 1;
-    } else {
-      summary.oppositeDirectionCount += 1;
-    }
+    const futureClose = candles[index + params.lookahead].c;
+    const priorRanges = candles.slice(Math.max(0, index - 20), index).map((c) => c.h - c.l);
+    const avgPriorRange = priorRanges.length > 0
+      ? priorRanges.reduce((sum, value) => sum + value, 0) / priorRanges.length
+      : (candle.h - candle.l);
+    const flatTolerance = Math.max(avgPriorRange * params.flatToleranceMultiplier, candle.c * 0.0005);
+    const priceDelta = futureClose - candle.c;
+    const directionMoved = Math.abs(priceDelta) <= flatTolerance ? "flat" : priceDelta > 0 ? "up" : "down";
+
+    let outcome;
+    if (directionMoved === "flat") outcome = "neutral";
+    else if (detection.bias === "neutral") outcome = "neutral";
+    else if ((detection.bias === "up" && directionMoved === "up") || (detection.bias === "down" && directionMoved === "down")) outcome = "successful";
+    else outcome = "unsuccessful";
+
+    if (outcome === "neutral") summary.neutralOutcomeCount += 1;
+    else if (outcome === "successful") summary.expectedDirectionCount += 1;
+    else summary.oppositeDirectionCount += 1;
+
     const priorVolumes = candles.slice(Math.max(0, index - 20), index).map((item) => Number(item.v) || 0).filter((value) => value > 0);
     const volume = Number(candle.v) > 0 ? Number(candle.v) : null;
-    const volumeRatio = volume && priorVolumes.length >= 5 ? Number((volume / (priorVolumes.reduce((sum, value) => sum + value, 0) / priorVolumes.length)).toFixed(2)) : null;
-    summary.details.push({ timestamp: candle.t, expectedDirection: detection.bias, outcome, formedAt: isAtSupport && isAtResistance ? "support-and-resistance" : isAtSupport ? "support" : "resistance", entryClose: candle.c, followThroughClose: futureClose, volume, volumeRatio, note: detection.note });
+    const volumeRatio = volume && priorVolumes.length >= 5
+      ? Number((volume / (priorVolumes.reduce((sum, value) => sum + value, 0) / priorVolumes.length)).toFixed(2))
+      : null;
+    const zonePrice = isAtSupport && isAtResistance
+      ? (Math.abs(candle.c - supportPrice) <= Math.abs(candle.c - resistancePrice) ? supportPrice : resistancePrice)
+      : isAtSupport ? supportPrice : resistancePrice;
+    summary.details.push({
+      timestamp: candle.t,
+      timeframe,
+      expectedDirection: detection.bias,
+      outcome,
+      directionMoved,
+      formedAt: isAtSupport && isAtResistance ? "support-and-resistance" : isAtSupport ? "support" : "resistance",
+      zonePrice,
+      entryClose: candle.c,
+      followThroughClose: futureClose,
+      volume,
+      volumeRatio,
+      note: detection.note
+    });
   }
 
   return CANDLESTICK_PATTERNS.map((pattern) => {
@@ -1422,7 +1492,7 @@ async function getLiveHistory(symbols, timeframes, years = 5) {
       sources.add(source);
       patterns.push(classifyPattern(meta, timeframe, frameCandles, source));
       candlestickOutcomes[symbol][timeframe] = coverage.hasRequestedCoverage
-        ? summarizeCandlestickOutcomes(analysisCandles)
+        ? summarizeCandlestickOutcomes(analysisCandles, timeframe)
         : [];
     }
   }

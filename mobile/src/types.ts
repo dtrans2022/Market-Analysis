@@ -212,9 +212,12 @@ export type CandlestickOutcomeSummary = {
 
 export type CandlestickOutcomeDetail = {
   timestamp: number;
+  timeframe?: MarketHistoryTimeframe;
   expectedDirection: "up" | "down" | "neutral";
   outcome: "successful" | "unsuccessful" | "neutral";
+  directionMoved?: "up" | "down" | "flat";
   formedAt: "support" | "resistance" | "support-and-resistance";
+  zonePrice?: number | null;
   entryClose: number;
   followThroughClose: number;
   volume: number | null;
