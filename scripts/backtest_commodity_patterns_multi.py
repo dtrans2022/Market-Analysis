@@ -18,7 +18,6 @@ from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable
 
 YAHOO_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?{query}"
 
@@ -34,9 +33,9 @@ COMMODITIES = [
 ]
 
 TIMEFRAMES = [
-    {"key": "1h", "yahoo_interval": "1h", "range": "730d", "pivot": 12, "lookahead": 12, "zone_pct": 0.006, "aggregate": 1},
-    {"key": "4h", "yahoo_interval": "1h", "range": "730d", "pivot": 8, "lookahead": 8, "zone_pct": 0.008, "aggregate": 4},
-    {"key": "1D", "yahoo_interval": "1d", "range": "3y", "pivot": 5, "lookahead": 5, "zone_pct": 0.010, "aggregate": 1},
+    {"key": "1h", "yahoo_interval": "1h", "range": "730d", "pivot": 12, "lookahead": 12, "zone_pct": 0.006, "aggregate": 1, "zone_lookback": 240},
+    {"key": "4h", "yahoo_interval": "1h", "range": "730d", "pivot": 8, "lookahead": 8, "zone_pct": 0.008, "aggregate": 4, "zone_lookback": 180},
+    {"key": "1D", "yahoo_interval": "1d", "range": "3y", "pivot": 5, "lookahead": 5, "zone_pct": 0.010, "aggregate": 1, "zone_lookback": 120},
 ]
 
 BULLISH_PATTERNS = {
@@ -129,14 +128,34 @@ def fetch_candles(symbol: str, interval: str, range_: str) -> list[Candle]:
 
 
 def aggregate_candles(candles: list[Candle], factor: int) -> list[Candle]:
+    """Aggregate 1h candles into N-hour candles aligned to UTC bucket boundaries.
+
+    Rather than blindly grouping every `factor` candles (which mis-aligns with real
+    4h boundaries used by trading platforms), this groups by the UTC hour bucket
+    `floor(hour / factor)` so a 4h bar is anchored at 00, 04, 08, 12, 16, or 20 UTC.
+    """
     if factor <= 1:
         return candles
+    buckets: dict[tuple[int, int, int, int], list[Candle]] = {}
+    order: list[tuple[int, int, int, int]] = []
+    for c in candles:
+        bucket_hour = (c.time.hour // factor) * factor
+        key = (c.time.year, c.time.month, c.time.day, bucket_hour)
+        if key not in buckets:
+            buckets[key] = []
+            order.append(key)
+        buckets[key].append(c)
+
     aggregated: list[Candle] = []
-    for i in range(0, len(candles) - factor + 1, factor):
-        group = candles[i : i + factor]
+    for key in order:
+        group = buckets[key]
+        if not group:
+            continue
+        year, month, day, hour = key
+        bucket_start = datetime(year, month, day, hour, tzinfo=timezone.utc)
         aggregated.append(
             Candle(
-                time=group[0].time,
+                time=bucket_start,
                 open=group[0].open,
                 high=max(c.high for c in group),
                 low=min(c.low for c in group),
@@ -146,26 +165,55 @@ def aggregate_candles(candles: list[Candle], factor: int) -> list[Candle]:
     return aggregated
 
 
-def pivot_zones(candles: list[Candle], window: int) -> tuple[list[float], list[float]]:
-    supports: list[float] = []
-    resistances: list[float] = []
-    for i in range(window, len(candles) - window):
-        segment = candles[i - window : i + window + 1]
-        pivot = candles[i]
+def confirmed_pivots(candles: list[Candle], window: int) -> tuple[list[tuple[int, float]], list[tuple[int, float]]]:
+    """Return (support_pivots, resistance_pivots) as (confirm_index, price) tuples.
+
+    A pivot at index p is only "confirmed" once `window` candles after it have
+    formed (i.e. at index p + window). Callers filter by confirm_index < i to
+    avoid look-ahead bias when evaluating candle i.
+    """
+    supports: list[tuple[int, float]] = []
+    resistances: list[tuple[int, float]] = []
+    for p in range(window, len(candles) - window):
+        segment = candles[p - window : p + window + 1]
+        pivot = candles[p]
+        confirm_index = p + window
         if pivot.low == min(c.low for c in segment):
-            supports.append(pivot.low)
+            supports.append((confirm_index, pivot.low))
         if pivot.high == max(c.high for c in segment):
-            resistances.append(pivot.high)
+            resistances.append((confirm_index, pivot.high))
     return supports, resistances
 
 
-def near_zone(price: float, zones: Iterable[float], tolerance: float) -> bool:
-    for zone in zones:
-        if zone <= 0:
+def match_zone(
+    price: float,
+    zones: list[tuple[int, float]],
+    tolerance: float,
+    current_index: int,
+    lookback: int,
+) -> float | None:
+    """Return the nearest zone price already confirmed and within tolerance, else None.
+
+    Only zones confirmed strictly before `current_index` are considered, and
+    only those whose confirm_index is within `lookback` bars of the current bar
+    (so ancient, stale levels are ignored). Returns the actual zone price so
+    callers can record which S/R level was matched.
+    """
+    best_price: float | None = None
+    best_dist = float("inf")
+    min_confirm = current_index - lookback
+    for confirm_index, zone_price in zones:
+        if confirm_index >= current_index:
+            break
+        if confirm_index < min_confirm:
             continue
-        if abs(price - zone) / zone <= tolerance:
-            return True
-    return False
+        if zone_price <= 0:
+            continue
+        dist = abs(price - zone_price) / zone_price
+        if dist <= tolerance and dist < best_dist:
+            best_dist = dist
+            best_price = zone_price
+    return best_price
 
 
 def body(candle: Candle) -> float:
@@ -267,7 +315,14 @@ def detect_patterns(candles: list[Candle], index: int) -> list[str]:
     return patterns
 
 
-def evaluate_outcome(candles: list[Candle], index: int, pattern: str, lookahead: int) -> dict | None:
+def evaluate_outcome(
+    candles: list[Candle],
+    index: int,
+    pattern: str,
+    lookahead: int,
+    timeframe: str,
+    zone_price: float,
+) -> dict | None:
     if index + lookahead >= len(candles):
         return None
 
@@ -300,8 +355,10 @@ def evaluate_outcome(candles: list[Candle], index: int, pattern: str, lookahead:
     return {
         "date": candles[index].time.strftime("%Y-%m-%d %H:%M UTC"),
         "timestamp": int(candles[index].time.timestamp()),
+        "timeframe": timeframe,
         "direction": direction,
         "entry": round(entry, 4),
+        "zonePrice": round(zone_price, 4),
         "reward": round(reward, 4),
         "risk": round(risk, 4),
         "riskReward": round(rr, 2),
@@ -322,7 +379,8 @@ def backtest(name: str, symbol: str, tf: dict) -> list[dict]:
         print(f"  [warn] not enough candles ({len(candles)})")
         return []
 
-    supports, resistances = pivot_zones(candles, tf["pivot"])
+    supports, resistances = confirmed_pivots(candles, tf["pivot"])
+    zone_lookback = tf.get("zone_lookback", 200)
 
     grouped: dict[tuple[str, str], dict] = {}
     for i in range(tf["pivot"], len(candles) - tf["lookahead"] - 1):
@@ -330,17 +388,25 @@ def backtest(name: str, symbol: str, tf: dict) -> list[dict]:
         patterns = detect_patterns(candles, i)
         if not patterns:
             continue
-        at_support = near_zone(candle.low, supports, tf["zone_pct"]) or near_zone(candle.close, supports, tf["zone_pct"])
-        at_resistance = near_zone(candle.high, resistances, tf["zone_pct"]) or near_zone(candle.close, resistances, tf["zone_pct"])
+        support_price = match_zone(candle.low, supports, tf["zone_pct"], i, zone_lookback)
+        if support_price is None:
+            support_price = match_zone(candle.close, supports, tf["zone_pct"], i, zone_lookback)
+        resistance_price = match_zone(candle.high, resistances, tf["zone_pct"], i, zone_lookback)
+        if resistance_price is None:
+            resistance_price = match_zone(candle.close, resistances, tf["zone_pct"], i, zone_lookback)
+
         for pattern in patterns:
             zone: str | None = None
-            if pattern in BULLISH_PATTERNS and at_support:
+            zone_price: float | None = None
+            if pattern in BULLISH_PATTERNS and support_price is not None:
                 zone = "support"
-            elif pattern in BEARISH_PATTERNS and at_resistance:
+                zone_price = support_price
+            elif pattern in BEARISH_PATTERNS and resistance_price is not None:
                 zone = "resistance"
-            if zone is None:
+                zone_price = resistance_price
+            if zone is None or zone_price is None:
                 continue
-            outcome = evaluate_outcome(candles, i, pattern, tf["lookahead"])
+            outcome = evaluate_outcome(candles, i, pattern, tf["lookahead"], tf["key"], zone_price)
             if outcome is None:
                 continue
             key = (pattern, zone)

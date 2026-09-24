@@ -7,8 +7,10 @@ import dataset from "../data/commodity-pattern-history.json";
 type Detail = {
   date: string;
   timestamp: number;
+  timeframe?: string;
   direction: "bullish" | "bearish";
   entry: number;
+  zonePrice?: number;
   reward: number;
   risk: number;
   riskReward: number;
@@ -74,7 +76,9 @@ export function HistoryScreen() {
       >
         <Text style={styles.intro}>
           Success = price closed in the expected direction within the lookahead window. R:R = average reward / adverse
-          excursion, capped at 10.0. Only patterns with 3+ occurrences are shown.
+          excursion, capped at 10.0. Only patterns with 3+ occurrences are shown. Expand a row to see each occurrence,
+          the timeframe (TF) it fired on, and the actual support/resistance level (Zone) the candle was touching so you
+          can verify it against your chart.
         </Text>
 
         <Text style={styles.groupLabel}>Timeframe</Text>
@@ -158,19 +162,31 @@ export function HistoryScreen() {
                   <Text style={styles.detailMeta}>
                     Successes {row.successes} / Failures {row.failures} | Avg reward {row.avgReward} | Avg risk {row.avgRisk}
                   </Text>
+                  <Text style={styles.detailLegend}>
+                    Each row shows the timeframe the signal fired on and the {row.zone === "support" ? "support" : "resistance"} price
+                    level (Zone) that the candle was touching within the zone tolerance. Compare Entry vs Zone on your chart.
+                  </Text>
                   <View style={styles.detailTableHeader}>
                     <Text style={[styles.detailCell, styles.detailDate, styles.detailHeaderText]}>Date (UTC)</Text>
+                    <Text style={[styles.detailCell, styles.detailTf, styles.detailHeaderText]}>TF</Text>
                     <Text style={[styles.detailCell, styles.detailDir, styles.detailHeaderText]}>Direction</Text>
                     <Text style={[styles.detailCell, styles.detailEntry, styles.detailHeaderText]}>Entry</Text>
+                    <Text style={[styles.detailCell, styles.detailZone, styles.detailHeaderText]}>Zone</Text>
                     <Text style={[styles.detailCell, styles.detailRR, styles.detailHeaderText]}>R:R</Text>
                     <Text style={[styles.detailCell, styles.detailOutcome, styles.detailHeaderText]}>Outcome</Text>
                   </View>
                   {row.details.map((detail) => (
                     <View key={`${detail.timestamp}-${detail.direction}`} style={styles.detailRow}>
                       <Text style={[styles.detailCell, styles.detailDate, styles.detailText]}>{detail.date}</Text>
+                      <Text style={[styles.detailCell, styles.detailTf, styles.detailText]}>
+                        {detail.timeframe ?? row.timeframe}
+                      </Text>
                       <Text style={[styles.detailCell, styles.detailDir, styles.detailText]}>{detail.direction}</Text>
                       <Text style={[styles.detailCell, styles.detailEntry, styles.detailText]}>
                         {detail.entry.toFixed(2)}
+                      </Text>
+                      <Text style={[styles.detailCell, styles.detailZone, styles.detailText]}>
+                        {typeof detail.zonePrice === "number" ? detail.zonePrice.toFixed(2) : "—"}
                       </Text>
                       <Text style={[styles.detailCell, styles.detailRR, styles.detailText]}>
                         {detail.riskReward.toFixed(2)}
@@ -188,7 +204,9 @@ export function HistoryScreen() {
                     </View>
                   ))}
                   <Text style={styles.detailFootnote}>
-                    Showing latest {row.details.length} of {row.occurrences} occurrences.
+                    Showing latest {row.details.length} of {row.occurrences} occurrences. Zone shows the pivot-based
+                    {row.zone === "support" ? " support" : " resistance"} level (confirmed before the candle) that the bar was within
+                    tolerance of.
                   </Text>
                 </View>
               ) : null}
@@ -316,7 +334,13 @@ const styles = StyleSheet.create({
     color: theme.colors.muted,
     fontSize: 11,
     marginTop: 4,
-    marginBottom: 10
+    marginBottom: 6
+  },
+  detailLegend: {
+    color: theme.colors.muted,
+    fontSize: 10,
+    lineHeight: 14,
+    marginBottom: 8
   },
   detailTableHeader: {
     flexDirection: "row",
@@ -343,26 +367,37 @@ const styles = StyleSheet.create({
     fontSize: 11
   },
   detailDate: {
-    flex: 1.8,
-    minWidth: 110
+    flex: 1.6,
+    minWidth: 108
+  },
+  detailTf: {
+    flex: 0.5,
+    minWidth: 34,
+    textAlign: "center",
+    fontWeight: "700"
   },
   detailDir: {
     flex: 0.9,
-    minWidth: 60
+    minWidth: 58
   },
   detailEntry: {
-    flex: 0.9,
-    minWidth: 56,
+    flex: 0.8,
+    minWidth: 52,
+    textAlign: "right"
+  },
+  detailZone: {
+    flex: 0.8,
+    minWidth: 52,
     textAlign: "right"
   },
   detailRR: {
-    flex: 0.6,
-    minWidth: 44,
+    flex: 0.55,
+    minWidth: 40,
     textAlign: "right"
   },
   detailOutcome: {
-    flex: 0.9,
-    minWidth: 60,
+    flex: 0.85,
+    minWidth: 56,
     textAlign: "right",
     fontWeight: "700"
   },
