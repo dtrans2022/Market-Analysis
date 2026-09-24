@@ -165,15 +165,35 @@ function aggregateCandles(candles: OhlcCandle[], bucket: number): OhlcCandle[] {
     return candles;
   }
 
-  const output: OhlcCandle[] = [];
-  for (let index = 0; index < candles.length; index += bucket) {
-    const chunk = candles.slice(index, index + bucket);
-    if (chunk.length === 0) {
-      continue;
-    }
+  const deltas: number[] = [];
+  for (let index = 1; index < candles.length; index += 1) {
+    const dt = candles[index].t - candles[index - 1].t;
+    if (dt > 0) deltas.push(dt);
+  }
+  if (deltas.length === 0) return candles;
+  deltas.sort((a, b) => a - b);
+  const medianDelta = deltas[Math.floor(deltas.length / 2)] || deltas[0];
+  const bucketSize = bucket * medianDelta;
 
+  const groups = new Map<number, OhlcCandle[]>();
+  const order: number[] = [];
+  for (const candle of candles) {
+    const key = Math.floor(candle.t / bucketSize) * bucketSize;
+    let group = groups.get(key);
+    if (!group) {
+      group = [];
+      groups.set(key, group);
+      order.push(key);
+    }
+    group.push(candle);
+  }
+
+  const output: OhlcCandle[] = [];
+  for (const key of order) {
+    const chunk = groups.get(key)!;
+    if (chunk.length === 0) continue;
     output.push({
-      t: chunk[0].t,
+      t: key,
       o: chunk[0].o,
       h: Math.max(...chunk.map((candle) => candle.h)),
       l: Math.min(...chunk.map((candle) => candle.l)),
