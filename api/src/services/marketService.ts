@@ -536,11 +536,50 @@ function withAudMetalDisplay(item: MarketTrend, usdAud: number | null): MarketTr
   };
 }
 
-type YahooQuoteResult = {
-  symbol?: string;
-  regularMarketPrice?: number;
-  regularMarketChangePercent?: number;
-};
+// Yahoo's v7 /finance/quote endpoint now requires a crumb/cookie and returns 401
+// from datacenter IPs (e.g. Render). The v8 /finance/chart endpoint stays open,
+// so quotes are derived from its `meta` block instead.
+async function fetchYahooChartQuote(code: string): Promise<{ price: number; changePercent: number } | null> {
+  try {
+    const url = new URL(`https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(code)}`);
+    url.searchParams.set("interval", "1d");
+    url.searchParams.set("range", "5d");
+
+    const response = await fetch(url, {
+      headers: {
+        "User-Agent": "Mozilla/5.0",
+        Accept: "application/json,text/plain,*/*",
+        Referer: "https://finance.yahoo.com/"
+      }
+    });
+
+    if (!response.ok) {
+      return null;
+    }
+
+    const payload = (await response.json()) as {
+      chart?: {
+        result?: Array<{
+          meta?: { regularMarketPrice?: number; chartPreviousClose?: number; previousClose?: number };
+        }>;
+      };
+    };
+
+    const meta = payload.chart?.result?.[0]?.meta;
+    const price = Number(meta?.regularMarketPrice);
+    const previousClose = Number(meta?.chartPreviousClose ?? meta?.previousClose);
+    if (!Number.isFinite(price) || price <= 0) {
+      return null;
+    }
+
+    const changePercent = Number.isFinite(previousClose) && previousClose > 0
+      ? ((price - previousClose) / previousClose) * 100
+      : 0;
+    return { price, changePercent };
+  } catch {
+    return null;
+  }
+}
 
 async function fetchYahooTrends(): Promise<MarketTrend[] | null> {
   const yahooSymbols = [
@@ -562,38 +601,20 @@ async function fetchYahooTrends(): Promise<MarketTrend[] | null> {
     { code: "CL=F", label: "WTI", name: "Crude Oil WTI", category: "oil" as const }
   ];
 
-  const url = new URL("https://query1.finance.yahoo.com/v7/finance/quote");
-  url.searchParams.set("symbols", yahooSymbols.map((item) => item.code).join(","));
+  const quotes = await Promise.all(
+    yahooSymbols.map(async (symbol) => ({ symbol, quote: await fetchYahooChartQuote(symbol.code) }))
+  );
 
-  const response = await fetch(url, {
-    headers: {
-      "User-Agent": "market-analysis-api"
-    }
-  });
+  const audUsd = quotes.find((item) => item.symbol.code === "AUDUSD=X")?.quote?.price;
+  const usdAud = usdToAudRate(audUsd);
 
-  if (!response.ok) {
-    return null;
-  }
-
-  const payload = (await response.json()) as {
-    quoteResponse?: {
-      result?: YahooQuoteResult[];
-    };
-  };
-
-  const map = new Map((payload.quoteResponse?.result ?? []).map((item) => [item.symbol, item]));
-  const usdAud = usdToAudRate(map.get("AUDUSD=X")?.regularMarketPrice);
-
-  const trends = yahooSymbols
-    .map((symbol) => {
-      const quote = map.get(symbol.code);
-      const price = quote?.regularMarketPrice;
-      const changePercent = quote?.regularMarketChangePercent;
-
-      if (typeof price !== "number" || typeof changePercent !== "number") {
+  const trends = quotes
+    .map(({ symbol, quote }) => {
+      if (!quote) {
         return null;
       }
 
+      const { price, changePercent } = quote;
       const direction = toDirection(changePercent);
       const confidence = Math.max(55, Math.min(95, Math.round(Math.abs(changePercent) * 10 + 60)));
 
