@@ -335,8 +335,17 @@ function toCandleSeries(payload: {
   return candles;
 }
 
-async function fetchYahooHistory(symbol: string): Promise<OhlcCandle[]> {
-  const response = await fetch(`https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?interval=1d&range=5y`, {
+const YAHOO_SERIES_CACHE = new Map<string, { expires: number; candles: OhlcCandle[] }>();
+const YAHOO_SERIES_TTL_MS = 5 * 60 * 1000;
+
+async function fetchYahooHistory(symbol: string, interval = "1d", range = "5y"): Promise<OhlcCandle[]> {
+  const cacheKey = `${symbol}|${interval}|${range}`;
+  const cached = YAHOO_SERIES_CACHE.get(cacheKey);
+  if (cached && cached.expires > Date.now()) {
+    return cached.candles;
+  }
+
+  const response = await fetch(`https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?interval=${encodeURIComponent(interval)}&range=${encodeURIComponent(range)}`, {
     headers: {
       "User-Agent": "Mozilla/5.0",
       Accept: "application/json,text/plain,*/*",
@@ -345,16 +354,16 @@ async function fetchYahooHistory(symbol: string): Promise<OhlcCandle[]> {
   });
 
   if (!response.ok) {
-    return [];
+    return cached?.candles ?? [];
   }
 
   const payload = await response.json();
   const result = payload?.chart?.result?.[0];
   if (!result) {
-    return [];
+    return cached?.candles ?? [];
   }
 
-  return toCandleSeries({
+  const candles = toCandleSeries({
     timestamp: result.timestamp,
     open: result.indicators?.quote?.[0]?.open,
     high: result.indicators?.quote?.[0]?.high,
@@ -362,6 +371,12 @@ async function fetchYahooHistory(symbol: string): Promise<OhlcCandle[]> {
     close: result.indicators?.quote?.[0]?.close,
     volume: result.indicators?.quote?.[0]?.volume
   });
+
+  if (candles.length > 0) {
+    YAHOO_SERIES_CACHE.set(cacheKey, { expires: Date.now() + YAHOO_SERIES_TTL_MS, candles });
+  }
+
+  return candles;
 }
 
 const FALLBACK_FOREX_PRICES: Record<string, number> = {
@@ -1526,15 +1541,44 @@ async function fetchForexHistory(pair: string, timeframe: HistoryTimeframe, year
 }
 
 async function fetchCommodityOrOilHistory(symbol: HistorySymbol, timeframe: HistoryTimeframe): Promise<HistorySeriesFrame> {
+  // Sub-daily timeframes must use genuine intraday bars. Yahoo's v8 chart endpoint
+  // exposes 1h intraday history for commodities/oil, so we fetch a bounded recent
+  // window and aggregate it to the requested timeframe. Using the 5-year daily
+  // series here would make support/resistance and technicals span years, producing
+  // nonsensical intraday trade plans.
+  const INTRADAY_PLAN: Partial<Record<HistoryTimeframe, { interval: string; range: string; bucket: number }>> = {
+    "15minute": { interval: "15m", range: "1mo", bucket: 1 },
+    "30minute": { interval: "30m", range: "1mo", bucket: 1 },
+    "1hour": { interval: "1h", range: "1mo", bucket: 1 },
+    "4hour": { interval: "1h", range: "3mo", bucket: 4 },
+    "12hour": { interval: "1h", range: "6mo", bucket: 12 }
+  };
+
+  const intradayPlan = INTRADAY_PLAN[timeframe];
+  if (intradayPlan) {
+    const intraday = await fetchYahooHistory(symbol.yahooCode, intradayPlan.interval, intradayPlan.range);
+    if (intraday.length > 0) {
+      const candles = aggregateCandles(intraday, intradayPlan.bucket);
+      return {
+        candles,
+        source: "live",
+        note: `Live Yahoo ${timeframeLabel(timeframe)} history for ${symbol.symbol}`,
+        ...historyCoverage(candles, 0)
+      };
+    }
+  }
+
   const daily = await fetchYahooHistory(symbol.yahooCode);
 
   if (daily.length === 0) {
     const candles = buildDerivedForexHistory(symbol.symbol, 5, FALLBACK_ASSET_PRICES[symbol.symbol] ?? 1);
+    const bucket = timeframe === "1Week" ? 5 : timeframe === "12hour" ? 2 : 1;
+    const derived = aggregateCandles(candles, bucket);
     return {
-      candles: timeframe === "1Week" ? aggregateCandles(candles, 5) : timeframe === "12hour" ? aggregateCandles(candles, 2) : candles,
+      candles: derived,
       source: "derived",
       note: `Derived ${timeframeLabel(timeframe)} bars using the configured reference price for ${symbol.symbol}`,
-      ...historyCoverage(candles, 5)
+      ...historyCoverage(derived, 5)
     };
   }
 
@@ -1547,15 +1591,6 @@ async function fetchCommodityOrOilHistory(symbol: HistorySymbol, timeframe: Hist
     };
   }
 
-  if (timeframe === "12hour") {
-    return {
-      candles: aggregateCandles(daily, 2),
-      source: "derived",
-      note: `Derived 12-hour history from Yahoo daily closes for ${symbol.symbol}`,
-      ...historyCoverage(aggregateCandles(daily, 2), 5)
-    };
-  }
-
   if (timeframe === "1Day") {
     return {
       candles: daily,
@@ -1565,11 +1600,15 @@ async function fetchCommodityOrOilHistory(symbol: HistorySymbol, timeframe: Hist
     };
   }
 
+  // Intraday intraday fetch failed and no dedicated branch above: fall back to the
+  // most recent slice of daily candles so support/resistance stay bounded to a
+  // sensible recent window rather than the full multi-year history.
+  const recentDaily = daily.slice(-60);
   return {
-    candles: daily,
+    candles: recentDaily,
     source: "derived",
-    note: `${symbol.symbol} does not expose public intraday history here; using derived bars from Yahoo daily history`,
-    ...historyCoverage(daily, 5)
+    note: `${symbol.symbol} intraday feed unavailable; using recent Yahoo daily history as a proxy`,
+    ...historyCoverage(recentDaily, 0)
   };
 }
 
