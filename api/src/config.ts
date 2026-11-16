@@ -49,7 +49,14 @@ const schema = z.object({
     .optional()
     .default("true")
     .transform((value) => value !== "false"),
-  MAJOR_NEWS_MIN_CONFIDENCE: z.coerce.number().default(0.7)
+  MAJOR_NEWS_MIN_CONFIDENCE: z.coerce.number().default(0.7),
+  SIGNAL_ALERTS_ENABLED: z
+    .string()
+    .optional()
+    .default("true")
+    .transform((value) => value !== "false"),
+  SIGNAL_POLL_INTERVAL_MS: z.coerce.number().default(900_000),
+  SIGNAL_MIN_CONFIDENCE: z.coerce.number().default(65)
 });
 
 export const config = schema.parse(process.env);

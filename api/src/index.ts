@@ -4,6 +4,7 @@ import { config } from "./config.js";
 import { router } from "./routes.js";
 import { startNewsToSlackNotifier } from "./services/newsNotifierService.js";
 import { startSelfHealingMonitor } from "./services/selfHealingService.js";
+import { startSignalNotifier } from "./services/signalNotifierService.js";
 
 const app = express();
 
@@ -19,4 +20,5 @@ app.listen(config.PORT, () => {
   console.log(`Market Analysis API running at http://localhost:${config.PORT}`);
   startNewsToSlackNotifier();
   startSelfHealingMonitor();
+  startSignalNotifier();
 });
