@@ -36,7 +36,14 @@ const schema = z.object({
   NEWS_SENTIMENT_LLM_BASE_URL: z.string().url().default("https://api.openai.com/v1"),
   NEWS_SENTIMENT_LLM_API_KEY: z.string().optional(),
   NEWS_SENTIMENT_LLM_MODEL: z.string().default("gpt-4o-mini"),
-  ALLOWED_ORIGIN: z.string().default("*")
+  ALLOWED_ORIGIN: z.string().default("*"),
+  SELF_PUBLIC_URL: z.string().url().optional(),
+  SELF_HEAL_ENABLED: z
+    .string()
+    .optional()
+    .default("true")
+    .transform((value) => value !== "false"),
+  SELF_HEAL_INTERVAL_MS: z.coerce.number().default(1_800_000)
 });
 
 export const config = schema.parse(process.env);
