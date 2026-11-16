@@ -70,6 +70,26 @@ function focusHint(asset: "forex" | "commodities" | "oil" | "shares", direction:
       : "Focus on stock selection over index direction";
 }
 
+// Major market-moving event keywords (rate decisions, inflation, jobs, etc.).
+const MAJOR_NEWS_TERMS = [
+  "interest rate", "rate decision", "rate hike", "rate cut", "rate hold", "basis point", "bps",
+  "federal reserve", "fomc", "ecb", "boj", "boe", "rba", "central bank", "monetary policy",
+  "inflation", "cpi", "ppi", "pce", "gdp", "recession", "jobs report", "nonfarm", "non-farm",
+  "payroll", "unemployment", "jobless", "opec", "production cut", "sanction", "tariff", "war",
+  "default", "downgrade", "crisis", "emergency", "hawkish", "dovish", "stimulus", "intervention"
+];
+
+/** A news item is "major" if it mentions a macro catalyst or carries a high-confidence directional impact. */
+function isMajorNews(news: NewsItem): boolean {
+  const text = `${news.title} ${news.summary}`.toLowerCase();
+  if (MAJOR_NEWS_TERMS.some((term) => text.includes(term))) {
+    return true;
+  }
+  return news.impacts.some(
+    (impact) => impact.direction !== "Neutral" && impact.confidence >= config.MAJOR_NEWS_MIN_CONFIDENCE
+  );
+}
+
 function buildBlocks(news: NewsItem): SlackBlock[] {
   const forex = news.impacts.find((item) => item.asset === "forex");
   const commodities = news.impacts.find((item) => item.asset === "commodities");
@@ -154,7 +174,10 @@ async function pollAndNotify() {
 
   // Apply user-configurable alert preferences before broadcasting.
   const preferences = await getAlertPreferences();
-  const allowed = fresh.filter((item) => shouldNotifyForNews(item, preferences));
+  let allowed = fresh.filter((item) => shouldNotifyForNews(item, preferences));
+  if (config.MAJOR_NEWS_ONLY) {
+    allowed = allowed.filter((item) => isMajorNews(item));
+  }
   if (allowed.length === 0) {
     notifierStatus.lastSentCount = 0;
     return 0;
@@ -164,7 +187,8 @@ async function pollAndNotify() {
   const ordered = [...allowed].reverse();
   let sentCount = 0;
   for (const item of ordered) {
-    const message = `New market update (${feed.source.toUpperCase()} source): ${item.title}`;
+    const prefix = config.MAJOR_NEWS_ONLY ? ":rotating_light: Major market news" : "New market update";
+    const message = `${prefix} (${feed.source.toUpperCase()} source): ${item.title}`;
     const blocks = buildBlocks(item);
     await sendSlackNotification(message, blocks);
     console.log(`Slack broadcast sent for news item: ${item.id}`);

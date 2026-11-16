@@ -43,7 +43,13 @@ const schema = z.object({
     .optional()
     .default("true")
     .transform((value) => value !== "false"),
-  SELF_HEAL_INTERVAL_MS: z.coerce.number().default(1_800_000)
+  SELF_HEAL_INTERVAL_MS: z.coerce.number().default(1_800_000),
+  MAJOR_NEWS_ONLY: z
+    .string()
+    .optional()
+    .default("true")
+    .transform((value) => value !== "false"),
+  MAJOR_NEWS_MIN_CONFIDENCE: z.coerce.number().default(0.7)
 });
 
 export const config = schema.parse(process.env);
