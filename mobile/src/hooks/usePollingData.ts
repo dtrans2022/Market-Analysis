@@ -27,10 +27,15 @@ export function usePollingData<T>(fetcher: () => Promise<T>, intervalMs: number,
   const inFlight = useRef(false);
   const fetcherRef = useRef(fetcher);
   const failureCountRef = useRef(0);
+  const dataRef = useRef<T | null>(data);
 
   useEffect(() => {
     fetcherRef.current = fetcher;
   }, [fetcher]);
+
+  useEffect(() => {
+    dataRef.current = data;
+  }, [data]);
 
   const load = useCallback(async () => {
     if (inFlight.current) {
@@ -56,7 +61,7 @@ export function usePollingData<T>(fetcher: () => Promise<T>, intervalMs: number,
       if (nextNotice) {
         setError(null);
         setNotice(nextNotice);
-      } else if (data && keepPreviousDataOnError) {
+      } else if (dataRef.current && keepPreviousDataOnError) {
         // Keep last known good data and avoid noisy transient failures.
         setError(null);
         setNotice("Live refresh is delayed. Showing last successful data.");
@@ -71,7 +76,7 @@ export function usePollingData<T>(fetcher: () => Promise<T>, intervalMs: number,
       setLoading(false);
       inFlight.current = false;
     }
-  }, [cacheKey, data, keepPreviousDataOnError]);
+  }, [cacheKey, keepPreviousDataOnError]);
 
   useEffect(() => {
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -113,7 +118,7 @@ export function usePollingData<T>(fetcher: () => Promise<T>, intervalMs: number,
       void load();
     };
 
-    if (!data) {
+    if (!dataRef.current) {
       void load();
     }
     schedule();
@@ -140,7 +145,7 @@ export function usePollingData<T>(fetcher: () => Promise<T>, intervalMs: number,
         window.removeEventListener("focus", refreshWhenVisible);
       }
     };
-  }, [data, intervalMs, load]);
+  }, [intervalMs, load]);
 
   return {
     data,

@@ -60,8 +60,8 @@ export default function App() {
       <ExpoStatusBar style="light" />
       <StatusBar barStyle="light-content" />
 
-      <View style={styles.ambientTop} pointerEvents="none" />
-      <View style={styles.ambientSide} pointerEvents="none" />
+      <View style={styles.ambientTop} />
+      <View style={styles.ambientSide} />
 
       <View style={styles.hero}>
         <View style={[styles.brandBadge, elevate(2, theme.colors.accent)]}>
@@ -134,7 +134,7 @@ export default function App() {
         })}
       </ScrollView>
 
-      <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
+      <ScrollView style={styles.contentScroll} contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
         {content}
       </ScrollView>
 
@@ -161,6 +161,7 @@ const styles = StyleSheet.create({
     width: 320,
     height: 320,
     borderRadius: 999,
+    pointerEvents: "none",
     backgroundColor: withAlpha(theme.colors.accent, 0.1)
   },
   ambientSide: {
@@ -170,6 +171,7 @@ const styles = StyleSheet.create({
     width: 260,
     height: 260,
     borderRadius: 999,
+    pointerEvents: "none",
     backgroundColor: withAlpha(theme.colors.accentViolet, 0.1)
   },
   hero: {
@@ -313,6 +315,9 @@ const styles = StyleSheet.create({
   content: {
     paddingBottom: 36,
     paddingTop: 2
+  },
+  contentScroll: {
+    flex: 1
   },
   disclaimerBar: {
     paddingVertical: 7,
