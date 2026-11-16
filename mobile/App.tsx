@@ -103,6 +103,12 @@ export default function App() {
       </View>
 
       <ScrollView contentContainerStyle={styles.content}>{content}</ScrollView>
+
+      <View style={styles.disclaimerBar}>
+        <Text style={styles.disclaimerText}>
+          For informational purposes only — not financial advice. Trading involves risk.
+        </Text>
+      </View>
     </SafeAreaView>
   );
 }
@@ -193,5 +199,16 @@ const styles = StyleSheet.create({
   },
   content: {
     paddingBottom: 36
+  },
+  disclaimerBar: {
+    paddingVertical: 6,
+    paddingHorizontal: 12,
+    borderTopWidth: 1,
+    borderTopColor: "#1c3440"
+  },
+  disclaimerText: {
+    color: theme.colors.muted,
+    fontSize: 11,
+    textAlign: "center"
   }
 });

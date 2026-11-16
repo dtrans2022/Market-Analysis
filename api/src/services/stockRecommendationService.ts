@@ -15,6 +15,14 @@ export type StockSuggestion = {
     volatility: number;
     sentiment: number;
     participation: number;
+    fundamentals?: number;
+  };
+  fundamentals?: {
+    peRatio?: number;
+    profitMargin?: number;
+    revenueGrowth?: number;
+    returnOnEquity?: number;
+    debtToEquity?: number;
   };
 };
 
@@ -95,6 +103,18 @@ type FinnhubSentiment = {
     buzz?: number;
     weeklyAverage?: number;
   };
+};
+
+type FinnhubMetric = {
+  metric?: Record<string, number | string | null>;
+};
+
+type StockFundamentals = {
+  peRatio?: number;
+  profitMargin?: number;
+  revenueGrowth?: number;
+  returnOnEquity?: number;
+  debtToEquity?: number;
 };
 
 type YahooQuoteResult = {
@@ -251,16 +271,85 @@ function scoreParticipation(buzz: number, weeklyAverage: number) {
   return clamp(ratio * 50, 0, 100);
 }
 
+function readMetric(metrics: Record<string, number | string | null> | undefined, ...keys: string[]): number | undefined {
+  if (!metrics) {
+    return undefined;
+  }
+  for (const key of keys) {
+    const raw = metrics[key];
+    const value = typeof raw === "string" ? Number(raw) : raw;
+    if (typeof value === "number" && Number.isFinite(value)) {
+      return value;
+    }
+  }
+  return undefined;
+}
+
+function parseFundamentals(payload: FinnhubMetric | null): StockFundamentals | undefined {
+  const metrics = payload?.metric;
+  if (!metrics) {
+    return undefined;
+  }
+
+  const fundamentals: StockFundamentals = {
+    peRatio: readMetric(metrics, "peTTM", "peBasicExclExtraTTM", "peExclExtraTTM"),
+    profitMargin: readMetric(metrics, "netProfitMarginTTM", "netProfitMarginAnnual"),
+    revenueGrowth: readMetric(metrics, "revenueGrowthTTMYoy", "revenueGrowthQuarterlyYoy", "revenueGrowth5Y"),
+    returnOnEquity: readMetric(metrics, "roeTTM", "roeRfy"),
+    debtToEquity: readMetric(metrics, "totalDebt/totalEquityQuarterly", "totalDebt/totalEquityAnnual", "longTermDebt/equityQuarterly")
+  };
+
+  const hasAny = Object.values(fundamentals).some((value) => typeof value === "number");
+  return hasAny ? fundamentals : undefined;
+}
+
+// Blend valuation + quality + growth + leverage into a single 0-100 score.
+function scoreFundamentals(fundamentals: StockFundamentals | undefined): number | undefined {
+  if (!fundamentals) {
+    return undefined;
+  }
+
+  const parts: number[] = [];
+
+  if (typeof fundamentals.peRatio === "number") {
+    // Reward reasonable valuations; loss-making (<=0) PE gets a modest floor.
+    const pe = fundamentals.peRatio;
+    parts.push(pe <= 0 ? 35 : clamp(100 - (pe - 15) * 2.5, 0, 100));
+  }
+  if (typeof fundamentals.profitMargin === "number") {
+    parts.push(clamp(fundamentals.profitMargin * 3, 0, 100));
+  }
+  if (typeof fundamentals.returnOnEquity === "number") {
+    parts.push(clamp(fundamentals.returnOnEquity * 3, 0, 100));
+  }
+  if (typeof fundamentals.revenueGrowth === "number") {
+    parts.push(clamp((fundamentals.revenueGrowth + 10) * (100 / 30), 0, 100));
+  }
+  if (typeof fundamentals.debtToEquity === "number") {
+    parts.push(clamp(100 - fundamentals.debtToEquity * 40, 0, 100));
+  }
+
+  if (parts.length === 0) {
+    return undefined;
+  }
+
+  return clamp(parts.reduce((sum, value) => sum + value, 0) / parts.length, 0, 100);
+}
+
 function buildRationale(inputs: {
   momentum: number;
   volatility: number;
   sentiment: number;
   participation: number;
+  fundamentals?: number;
 }) {
   const drivers: string[] = [];
 
   if (inputs.momentum >= 70) {
     drivers.push("strong price momentum");
+  }
+  if (typeof inputs.fundamentals === "number" && inputs.fundamentals >= 65) {
+    drivers.push("solid fundamentals");
   }
   if (inputs.sentiment >= 60) {
     drivers.push("positive news sentiment");
@@ -494,10 +583,16 @@ export async function getBestShares(): Promise<StockSuggestion[]> {
         sentimentUrl.searchParams.set("symbol", stock.symbol);
         sentimentUrl.searchParams.set("token", config.FINNHUB_API_KEY!);
 
+        const metricUrl = new URL("https://finnhub.io/api/v1/stock/metric");
+        metricUrl.searchParams.set("symbol", stock.symbol);
+        metricUrl.searchParams.set("metric", "all");
+        metricUrl.searchParams.set("token", config.FINNHUB_API_KEY!);
+
         try {
-          const [quoteResponse, sentimentResponse] = await Promise.all([
+          const [quoteResponse, sentimentResponse, metricResponse] = await Promise.all([
             fetch(quoteUrl),
-            fetch(sentimentUrl)
+            fetch(sentimentUrl),
+            fetch(metricUrl)
           ]);
 
           if (!quoteResponse.ok || !sentimentResponse.ok) {
@@ -506,6 +601,7 @@ export async function getBestShares(): Promise<StockSuggestion[]> {
 
           const quote = (await quoteResponse.json()) as FinnhubQuote;
           const sentimentPayload = (await sentimentResponse.json()) as FinnhubSentiment;
+          const metricPayload = metricResponse.ok ? ((await metricResponse.json()) as FinnhubMetric) : null;
 
           if (!Number.isFinite(quote.c) || !Number.isFinite(quote.dp) || !Number.isFinite(quote.pc)) {
             return null;
@@ -531,12 +627,20 @@ export async function getBestShares(): Promise<StockSuggestion[]> {
           const volatility = scoreVolatility(rangePercent);
           const sentiment = scoreSentiment(newsSentiment);
           const participation = scoreParticipation(buzz, weeklyAverage);
+          const fundamentals = parseFundamentals(metricPayload);
+          const fundamentalsScore = scoreFundamentals(fundamentals);
 
           const score =
-            momentum * 0.45 +
-            volatility * 0.15 +
-            sentiment * 0.25 +
-            participation * 0.15;
+            typeof fundamentalsScore === "number"
+              ? momentum * 0.35 +
+                fundamentalsScore * 0.2 +
+                volatility * 0.1 +
+                sentiment * 0.2 +
+                participation * 0.15
+              : momentum * 0.45 +
+                volatility * 0.15 +
+                sentiment * 0.25 +
+                participation * 0.15;
 
           return {
             symbol: stock.symbol,
@@ -550,13 +654,16 @@ export async function getBestShares(): Promise<StockSuggestion[]> {
               momentum: Number(momentum.toFixed(1)),
               volatility: Number(volatility.toFixed(1)),
               sentiment: Number(sentiment.toFixed(1)),
-              participation: Number(participation.toFixed(1))
+              participation: Number(participation.toFixed(1)),
+              fundamentals: typeof fundamentalsScore === "number" ? Number(fundamentalsScore.toFixed(1)) : undefined
             },
+            fundamentals,
             rationale: buildRationale({
               momentum,
               volatility,
               sentiment,
-              participation
+              participation,
+              fundamentals: fundamentalsScore
             })
           } satisfies StockSuggestion;
         } catch {

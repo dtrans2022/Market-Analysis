@@ -2,6 +2,23 @@ import { getLiveForexSpotPrice, getLiveMetalSpotPrice } from "./marketService.js
 import { config } from "../config.js";
 import { getLatestMt4Snapshot } from "./mt4Service.js";
 import { getMarketHistory, type HistoryTimeframe, type MarketAssetCategory, type MarketPatternSignal, type HistorySource, type CandlestickPattern } from "./marketHistoryService.js";
+import {
+  calibrateConfidence,
+  computeHistoricalRecurrenceConfidenceAdjustment,
+  computeOscillatorConfidenceAdjustment,
+  computeVolatilityConfidenceAdjustment,
+  confidenceBucket,
+  emptyCalibrationStatsByTimeframe,
+  type CalibrationStatsByTimeframe
+} from "@market-analysis/shared";
+import { getMarketNewsSentiment, resolveSymbolNewsScore, type MarketNewsSentiment } from "./newsSentimentService.js";
+
+// Re-exported for existing consumers (tests, callers) that import from this module.
+export {
+  computeHistoricalRecurrenceConfidenceAdjustment,
+  computeOscillatorConfidenceAdjustment,
+  computeVolatilityConfidenceAdjustment
+};
 
 export type MarketAgentName = "Forex" | "Commodities" | "Oil";
 
@@ -71,7 +88,8 @@ export type MarketAgentSentimentFlowBreakdown = {
   optionsMarket: number;
   retailPositioning: number;
   economicCalendar: number;
-  source: "proxy";
+  newsSentiment?: number;
+  source: "proxy" | "live-news";
 };
 
 export type MarketAgentTimeframeSignal = {
@@ -275,12 +293,87 @@ const TIMEFRAME_WEIGHTS: Record<MarketAgentAnalysisTimeframe, number> = {
   "1Week": 1
 };
 
-const CONFIDENCE_CALIBRATION_PRIOR_WEIGHT = 25;
 const MARKET_AGENTS_CACHE_TTL_MS = 20_000;
 
 const forexTradeLedger = new Map<string, ForexTradeMonitoringItem>();
 let marketAgentsCache: { value: MarketAgentsResponse; cachedAt: number } | null = null;
 let marketAgentsInFlight: Promise<MarketAgentsResponse> | null = null;
+
+const FOREX_LEDGER_PERSIST_KEY = "latest";
+let ledgerLoadAttempted = false;
+let ledgerPersistInFlight = false;
+let ledgerPersistPending = false;
+
+function canPersistLedger() {
+  return Boolean(config.SUPABASE_URL && config.SUPABASE_SERVICE_ROLE_KEY);
+}
+
+function supabaseLedgerHeaders() {
+  return {
+    apikey: config.SUPABASE_SERVICE_ROLE_KEY ?? "",
+    Authorization: `Bearer ${config.SUPABASE_SERVICE_ROLE_KEY ?? ""}`,
+    "Content-Type": "application/json"
+  };
+}
+
+async function loadPersistedLedger() {
+  if (ledgerLoadAttempted || !canPersistLedger()) {
+    return;
+  }
+
+  ledgerLoadAttempted = true;
+  try {
+    const url = `${config.SUPABASE_URL}/rest/v1/${config.SUPABASE_FOREX_LEDGER_TABLE}?ledger_key=eq.${FOREX_LEDGER_PERSIST_KEY}&select=payload&limit=1`;
+    const response = await fetch(url, { headers: supabaseLedgerHeaders() });
+    if (!response.ok) {
+      return;
+    }
+
+    const rows = await response.json() as Array<{ payload?: { trades?: ForexTradeMonitoringItem[] } }>;
+    const trades = rows[0]?.payload?.trades;
+    if (Array.isArray(trades)) {
+      for (const trade of trades) {
+        if (trade && typeof trade.tradeId === "string") {
+          forexTradeLedger.set(trade.tradeId, trade);
+        }
+      }
+      normalizeTradeLedger();
+    }
+  } catch {
+    // Keep in-memory calibration if Supabase is unavailable.
+  }
+}
+
+function persistLedger() {
+  if (!canPersistLedger()) {
+    return;
+  }
+
+  // Coalesce concurrent writes so only one request is in flight at a time.
+  if (ledgerPersistInFlight) {
+    ledgerPersistPending = true;
+    return;
+  }
+
+  ledgerPersistInFlight = true;
+  const trades = Array.from(forexTradeLedger.values());
+  const url = `${config.SUPABASE_URL}/rest/v1/${config.SUPABASE_FOREX_LEDGER_TABLE}`;
+  void fetch(url, {
+    method: "POST",
+    headers: { ...supabaseLedgerHeaders(), Prefer: "resolution=merge-duplicates" },
+    body: JSON.stringify({ ledger_key: FOREX_LEDGER_PERSIST_KEY, payload: { trades }, updated_at: new Date().toISOString() })
+  })
+    .catch(() => {
+      // Keep the live process usable during a temporary database outage.
+    })
+    .finally(() => {
+      ledgerPersistInFlight = false;
+      if (ledgerPersistPending) {
+        ledgerPersistPending = false;
+        persistLedger();
+      }
+    });
+}
 
 function formatTimestamp(timestamp: number) {
   return new Date(timestamp).toISOString();
@@ -336,39 +429,6 @@ function buildSimulatedTradeId(symbol: string, signal: MarketAgentTimeframeSigna
   ].join(":");
 }
 
-function confidenceBucket(confidence: number) {
-  if (confidence <= 64) {
-    return "55-64";
-  }
-
-  if (confidence <= 74) {
-    return "65-74";
-  }
-
-  if (confidence <= 84) {
-    return "75-84";
-  }
-
-  return "85+";
-}
-
-type ConfidenceCalibrationStats = {
-  wins: number;
-  total: number;
-};
-
-type CalibrationStatsByTimeframe = Record<MarketAgentAnalysisTimeframe, Record<string, ConfidenceCalibrationStats>>;
-
-function emptyCalibrationStatsByTimeframe(): CalibrationStatsByTimeframe {
-  return {
-    "1hour": {},
-    "4hour": {},
-    "12hour": {},
-    "1Day": {},
-    "1Week": {}
-  };
-}
-
 function buildCalibrationStatsByTimeframe(): CalibrationStatsByTimeframe {
   const stats = emptyCalibrationStatsByTimeframe();
 
@@ -393,26 +453,6 @@ function buildCalibrationStatsByTimeframe(): CalibrationStatsByTimeframe {
   }
 
   return stats;
-}
-
-function calibrateConfidence(
-  rawConfidence: number,
-  timeframe: MarketAgentAnalysisTimeframe,
-  calibrationStatsByTimeframe: CalibrationStatsByTimeframe
-) {
-  const bucket = confidenceBucket(rawConfidence);
-  const bucketStats = calibrationStatsByTimeframe[timeframe][bucket];
-  const total = bucketStats?.total ?? 0;
-  const wins = bucketStats?.wins ?? 0;
-
-  // Bayesian smoothing: blend empirical win-rate with raw-confidence prior.
-  const prior = clamp(rawConfidence / 100, 0.01, 0.99);
-  const posterior = (wins + CONFIDENCE_CALIBRATION_PRIOR_WEIGHT * prior) / (total + CONFIDENCE_CALIBRATION_PRIOR_WEIGHT);
-  return {
-    calibratedConfidence: Math.round(clamp(posterior * 100, 1, 99)),
-    calibrationSampleSize: total,
-    calibrationBucket: bucket
-  };
 }
 
 function normalizeTradeLedger() {
@@ -735,56 +775,6 @@ function calculateImpliedVolatilityProxy(bollingerWidthPercent: number, atrPerce
   return clamp((bollingerWidthPercent * 0.75) + (atrPercent * 1.1), 0, 100);
 }
 
-export function computeVolatilityConfidenceAdjustment(technicals: Pick<MarketAgentTechnicalAnalysis, "bollingerWidthPercent" | "atrPercent" | "impliedVolatilityPercent">) {
-  let adjustment = 0;
-
-  if (technicals.bollingerWidthPercent < 0.8) {
-    adjustment += 4;
-  } else if (technicals.bollingerWidthPercent > 2.2) {
-    adjustment -= 2;
-  }
-
-  if (technicals.atrPercent < 0.8) {
-    adjustment += 2;
-  } else if (technicals.atrPercent > 1.8) {
-    adjustment -= 2;
-  }
-
-  if (technicals.impliedVolatilityPercent > 2.5) {
-    adjustment -= 3;
-  } else if (technicals.impliedVolatilityPercent < 1.1) {
-    adjustment += 2;
-  }
-
-  return clamp(adjustment, -6, 6);
-}
-
-export function computeOscillatorConfidenceAdjustment(technicals: Pick<MarketAgentTechnicalAnalysis, "rsi14" | "macdHistogram">) {
-  let adjustment = 0;
-
-  if (technicals.rsi14 <= 30) {
-    adjustment += 2;
-  } else if (technicals.rsi14 >= 70) {
-    adjustment -= 2;
-  }
-
-  if (technicals.macdHistogram > 0) {
-    adjustment += 1;
-  } else if (technicals.macdHistogram < 0) {
-    adjustment -= 1;
-  }
-
-  return clamp(adjustment, -4, 4);
-}
-
-export function computeHistoricalRecurrenceConfidenceAdjustment(score: number | undefined) {
-  if (typeof score !== "number" || !Number.isFinite(score)) {
-    return 0;
-  }
-
-  return Math.round(clamp(score, -6, 6));
-}
-
 export function buildTechnicalAnalysis(symbol: string, timeframe: MarketAgentAnalysisTimeframe, candles: { t: number; o: number; h: number; l: number; c: number }[], support: number, resistance: number): MarketAgentTechnicalAnalysis {
   const closes = candles.map((candle) => candle.c);
   const recentCloses = closes.slice(-20);
@@ -997,7 +987,8 @@ function buildSentimentFlowProxy(
   direction: "up" | "down" | "neutral",
   pattern: MarketPatternKind,
   technicals: MarketAgentTechnicalAnalysis,
-  fundamentals: MarketAgentFundamentalAnalysis
+  fundamentals: MarketAgentFundamentalAnalysis,
+  newsScore?: number
 ): { impactScore: number; summary: string; breakdown: MarketAgentSentimentFlowBreakdown } {
   const dir = scoreDirection(direction);
   const trendBias = scoreDirection(technicals.ema20 >= technicals.ema50 ? "up" : "down");
@@ -1013,13 +1004,17 @@ function buildSentimentFlowProxy(
   const retailPositioning = clamp((dir === 0 ? 0 : -dir) + (pattern === "reversal" ? dir : 0), -2, 2);
   const economicCalendar = clamp((highEventRiskWindow ? -1 : 0) + ((pattern === "breakout" || pattern === "momentum") ? dir : 0), -2, 2);
 
+  const hasLiveNews = typeof newsScore === "number" && Number.isFinite(newsScore) && newsScore !== 0;
+  const newsSentiment = hasLiveNews ? clamp(Math.round(newsScore * 3), -3, 3) : 0;
+
   const rawImpact = cotReport
     + interestRateDifferential
     + centralBankCommentary
     + riskOnRiskOff
     + optionsMarket
     + retailPositioning
-    + economicCalendar;
+    + economicCalendar
+    + newsSentiment;
   const impactScore = clamp(rawImpact, -10, 10);
 
   const breakdown: MarketAgentSentimentFlowBreakdown = {
@@ -1030,7 +1025,8 @@ function buildSentimentFlowProxy(
     optionsMarket,
     retailPositioning,
     economicCalendar,
-    source: "proxy"
+    newsSentiment: hasLiveNews ? newsSentiment : undefined,
+    source: hasLiveNews ? "live-news" : "proxy"
   };
 
   const summary = [
@@ -1040,7 +1036,8 @@ function buildSentimentFlowProxy(
     `Risk ${riskOnRiskOff >= 0 ? "+" : ""}${riskOnRiskOff}`,
     `Options ${optionsMarket >= 0 ? "+" : ""}${optionsMarket}`,
     `Retail ${retailPositioning >= 0 ? "+" : ""}${retailPositioning}`,
-    `Calendar ${economicCalendar >= 0 ? "+" : ""}${economicCalendar}`
+    `Calendar ${economicCalendar >= 0 ? "+" : ""}${economicCalendar}`,
+    ...(hasLiveNews ? [`News ${newsSentiment >= 0 ? "+" : ""}${newsSentiment}`] : [])
   ].join(" | ");
 
   return { impactScore, summary, breakdown };
@@ -1075,7 +1072,8 @@ export function buildSignal(
   source: HistorySource,
   liveSpotPrice?: number | null,
   calibrationStatsByTimeframe?: CalibrationStatsByTimeframe,
-  commodityContext?: CommodityFundamentalContext
+  commodityContext?: CommodityFundamentalContext,
+  newsSentiment?: MarketNewsSentiment | null
 ): MarketAgentTimeframeSignal | null {
   const hasRecognizedCandle = !!pattern.candlestickPattern && pattern.candlestickPattern !== "none";
   const hasUsableConfidence = pattern.confidence >= 60;
@@ -1090,7 +1088,8 @@ export function buildSignal(
   const strategiesApplied = strategiesForPattern(pattern.pattern, pattern.direction, category, symbol);
   const technicals = buildTechnicalAnalysis(symbol, timeframe, candles, pattern.support, pattern.resistance);
   const fundamentals = buildFundamentalAnalysis(category, symbol, pattern.direction, commodityContext);
-  const sentimentFlow = buildSentimentFlowProxy(symbol, timeframe, pattern.direction, pattern.pattern, technicals, fundamentals);
+  const symbolNewsScore = newsSentiment ? resolveSymbolNewsScore(symbol, newsSentiment) : undefined;
+  const sentimentFlow = buildSentimentFlowProxy(symbol, timeframe, pattern.direction, pattern.pattern, technicals, fundamentals, symbolNewsScore);
   const volatilityAdjustment = computeVolatilityConfidenceAdjustment(technicals);
   const oscillatorAdjustment = computeOscillatorConfidenceAdjustment(technicals);
   const historicalRecurrenceAdjustment = computeHistoricalRecurrenceConfidenceAdjustment(pattern.historicalRecurrenceScore);
@@ -1184,8 +1183,10 @@ async function buildMarketAgentsAnalysis(): Promise<MarketAgentsResponse> {
   const forexValidation: ForexValidationItem[] = [];
   const sources = new Set<HistorySource>();
   const generatedAt = new Date().toISOString();
+  await loadPersistedLedger();
   const calibrationStatsByTimeframe = buildCalibrationStatsByTimeframe();
   const commodityFundamentalContext = await fetchCommodityFundamentalContext();
+  const marketNewsSentiment = await getMarketNewsSentiment().catch(() => null);
   const mt4Snapshot = await getLatestMt4Snapshot();
   const mt4QuotesBySymbol = new Map<string, number>();
 
@@ -1223,7 +1224,7 @@ async function buildMarketAgentsAnalysis(): Promise<MarketAgentsResponse> {
             return null;
           }
 
-          const signal = buildSignal(symbol, config.category, timeframe, pattern, frame.candles, frame.source, liveSpotPrice, calibrationStatsByTimeframe, commodityFundamentalContext);
+          const signal = buildSignal(symbol, config.category, timeframe, pattern, frame.candles, frame.source, liveSpotPrice, calibrationStatsByTimeframe, commodityFundamentalContext, marketNewsSentiment);
           if (signal) {
             sources.add(frame.source);
             if (config.category === "forex") {
@@ -1476,6 +1477,7 @@ function updateOpenTradesWithCurrentPrices(forex: MarketAgentReport, generatedAt
 }
 
 export async function getForexTradeMonitoringReport(): Promise<ForexTradeMonitoringReport> {
+  await loadPersistedLedger();
   const agents = await getMarketAgentsAnalysis();
   const forex = agents.data.find((agent) => agent.agent === "Forex");
   const generatedAt = new Date().toISOString();
@@ -1502,6 +1504,7 @@ export async function getForexTradeMonitoringReport(): Promise<ForexTradeMonitor
   purgeMonitoringLedgerBeforeDay(MONITORING_START_DAY_KEY);
   upsertSimulatedTradesFromForexAgent(forex, generatedAt);
   updateOpenTradesWithCurrentPrices(forex, generatedAt);
+  persistLedger();
 
   const items = Array.from(forexTradeLedger.values()).sort((left, right) => {
     return new Date(right.openedAt).getTime() - new Date(left.openedAt).getTime();

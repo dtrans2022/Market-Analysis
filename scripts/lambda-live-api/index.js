@@ -3,6 +3,29 @@ const RSS_FEEDS = [
   "https://finance.yahoo.com/news/rssindex"
 ];
 
+const MARKET_RELEVANCE_TERMS = [
+  "market", "stock", "share", "equit", "index", "dow", "nasdaq", "s&p", "ftse", "nikkei",
+  "forex", "currency", "dollar", "euro", "yen", "pound", "sterling", "franc", "yuan",
+  "fed", "federal reserve", "central bank", "ecb", "boj", "boe", "rba", "rate", "yield",
+  "inflation", "cpi", "gdp", "jobs", "payroll", "unemployment", "recession", "economy", "economic",
+  "oil", "crude", "brent", "wti", "opec", "gold", "silver", "commodit", "bond", "treasury",
+  "earnings", "revenue", "profit", "ipo", "merger", "acquisition", "crypto", "bitcoin", "etf",
+  "trade", "tariff", "export", "import", "manufacturing", "pmi", "bank", "hike", "cut", "dovish", "hawkish"
+];
+
+const PERSONAL_FINANCE_NOISE_TERMS = [
+  "my husband", "my wife", "my mother", "my father", "my sister", "my brother", "my son",
+  "my daughter", "my family", "inheritance", "widow", "stepkid", "stepchild", "my will",
+  "sour taste", "advice column", "my neighbor", "my cousin", "my boyfriend", "my girlfriend"
+];
+
+function isMarketRelevant(title, summary) {
+  const text = `${title} ${summary}`.toLowerCase();
+  const hasNoise = PERSONAL_FINANCE_NOISE_TERMS.some((term) => text.includes(term));
+  const hasMarketTerm = MARKET_RELEVANCE_TERMS.some((term) => text.includes(term));
+  return hasMarketTerm && !hasNoise;
+}
+
 const STRICT_LIVE_MODE = true;
 const FINNHUB_API_KEY = process.env.FINNHUB_API_KEY || "";
 const MT4_SNAPSHOT_API_KEY = process.env.MT4_SNAPSHOT_API_KEY || "";
@@ -3661,6 +3684,10 @@ async function getLiveNews() {
         const dt = new Date(pubDateRaw);
 
         if (!title || !url) {
+          continue;
+        }
+
+        if (!isMarketRelevant(title, summary)) {
           continue;
         }
 

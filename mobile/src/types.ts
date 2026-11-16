@@ -60,6 +60,14 @@ export type StockSuggestion = {
     volatility: number;
     sentiment: number;
     participation: number;
+    fundamentals?: number;
+  };
+  fundamentals?: {
+    peRatio?: number;
+    profitMargin?: number;
+    revenueGrowth?: number;
+    returnOnEquity?: number;
+    debtToEquity?: number;
   };
 };
 
@@ -77,6 +85,18 @@ export type NotifierStatus = {
   lastSentCount: number;
   totalSentCount: number;
   lastError: string | null;
+};
+
+export type AlertAsset = "forex" | "commodities" | "oil" | "shares";
+
+export type AlertPreferences = {
+  enabled: boolean;
+  enabledAssets: AlertAsset[];
+  minConfidence: number;
+  watchKeywords: string[];
+  mutedKeywords: string[];
+  quietHours: { startHour: number; endHour: number } | null;
+  updatedAt: string;
 };
 
 export type ForexTimeframe =

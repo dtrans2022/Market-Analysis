@@ -58,7 +58,7 @@ export function BestSharesScreen() {
 
   return (
     <View>
-      <SectionCard title="Top Trending Shares" subtitle="Suggestions based on momentum and participation">
+      <SectionCard title="Top Trending Shares" subtitle="Ranked by momentum, fundamentals, sentiment and participation">
         {loading ? <Text style={styles.muted}>Loading share ideas...</Text> : null}
         {notice ? <Text style={styles.notice}>{notice}</Text> : null}
         {error && !(data && data.length > 0) ? <Text style={styles.error}>{error}</Text> : null}
@@ -98,6 +98,12 @@ export function BestSharesScreen() {
                     <Text style={styles.scoreLabel}>PART</Text>
                     <Text style={styles.scoreValue}>{item.factorScores.participation.toFixed(0)}</Text>
                   </View>
+                  {typeof item.factorScores.fundamentals === "number" ? (
+                    <View style={styles.scoreChip}>
+                      <Text style={styles.scoreLabel}>FUND</Text>
+                      <Text style={styles.scoreValue}>{item.factorScores.fundamentals.toFixed(0)}</Text>
+                    </View>
+                  ) : null}
                 </View>
 
                 <View style={styles.barGroup}>
@@ -113,7 +119,24 @@ export function BestSharesScreen() {
                   <FactorBar label="Sentiment" value={item.factorScores.sentiment} color="#7dc4ff" />
                   <FactorBar label="Volatility" value={item.factorScores.volatility} color="#ffd166" />
                   <FactorBar label="Participation" value={item.factorScores.participation} color="#d3a6ff" />
+                  {typeof item.factorScores.fundamentals === "number" ? (
+                    <FactorBar label="Fundamentals" value={item.factorScores.fundamentals} color="#8affc1" />
+                  ) : null}
                 </View>
+
+                {item.fundamentals ? (
+                  <Text style={styles.fundamentalsLine}>
+                    {[
+                      typeof item.fundamentals.peRatio === "number" ? `P/E ${item.fundamentals.peRatio.toFixed(1)}` : null,
+                      typeof item.fundamentals.profitMargin === "number" ? `Margin ${item.fundamentals.profitMargin.toFixed(1)}%` : null,
+                      typeof item.fundamentals.revenueGrowth === "number" ? `Rev ${item.fundamentals.revenueGrowth.toFixed(1)}%` : null,
+                      typeof item.fundamentals.returnOnEquity === "number" ? `ROE ${item.fundamentals.returnOnEquity.toFixed(1)}%` : null,
+                      typeof item.fundamentals.debtToEquity === "number" ? `D/E ${item.fundamentals.debtToEquity.toFixed(2)}` : null
+                    ]
+                      .filter((part): part is string => part !== null)
+                      .join("  |  ")}
+                  </Text>
+                ) : null}
               </>
             ) : null}
             <Text style={styles.rationale}>{item.rationale}</Text>
@@ -249,6 +272,12 @@ const styles = StyleSheet.create({
     color: theme.colors.muted,
     marginTop: 5,
     fontSize: 12
+  },
+  fundamentalsLine: {
+    color: theme.colors.text,
+    marginTop: 8,
+    fontSize: 11,
+    fontWeight: "600"
   },
   muted: {
     color: theme.colors.muted

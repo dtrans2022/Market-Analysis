@@ -62,6 +62,29 @@ function extractTagValue(itemXml: string, tagName: string): string {
   return match?.[1]?.trim() ?? "";
 }
 
+const MARKET_RELEVANCE_TERMS = [
+  "market", "stock", "share", "equit", "index", "dow", "nasdaq", "s&p", "ftse", "nikkei",
+  "forex", "currency", "dollar", "euro", "yen", "pound", "sterling", "franc", "yuan",
+  "fed", "federal reserve", "central bank", "ecb", "boj", "boe", "rba", "rate", "yield",
+  "inflation", "cpi", "gdp", "jobs", "payroll", "unemployment", "recession", "economy", "economic",
+  "oil", "crude", "brent", "wti", "opec", "gold", "silver", "commodit", "bond", "treasury",
+  "earnings", "revenue", "profit", "ipo", "merger", "acquisition", "crypto", "bitcoin", "etf",
+  "trade", "tariff", "export", "import", "manufacturing", "pmi", "bank", "hike", "cut", "dovish", "hawkish"
+];
+
+const PERSONAL_FINANCE_NOISE_TERMS = [
+  "my husband", "my wife", "my mother", "my father", "my sister", "my brother", "my son",
+  "my daughter", "my family", "inheritance", "widow", "stepkid", "stepchild", "my will",
+  "sour taste", "dear ", "advice column", "my neighbor", "my cousin", "my boyfriend", "my girlfriend"
+];
+
+function isMarketRelevant(title: string, summary: string): boolean {
+  const text = `${title} ${summary}`.toLowerCase();
+  const hasNoise = PERSONAL_FINANCE_NOISE_TERMS.some((term) => text.includes(term));
+  const hasMarketTerm = MARKET_RELEVANCE_TERMS.some((term) => text.includes(term));
+  return hasMarketTerm && !hasNoise;
+}
+
 async function fetchRssNews(assetSnapshot: AssetSnapshot): Promise<NewsItem[] | null> {
   const collected: NewsItem[] = [];
 
@@ -91,6 +114,10 @@ async function fetchRssNews(assetSnapshot: AssetSnapshot): Promise<NewsItem[] | 
           : parsedDate.toISOString();
 
         if (!title || !url) {
+          continue;
+        }
+
+        if (!isMarketRelevant(title, summary)) {
           continue;
         }
 

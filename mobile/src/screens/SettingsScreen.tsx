@@ -1,11 +1,11 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { ActivityIndicator, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
-import { fetchMt4Quotes, fetchMt4Snapshot, fetchNotifierStatus, postSlackAlert } from "../api/client";
+import { fetchAlertPreferences, fetchMt4Quotes, fetchMt4Snapshot, fetchNotifierStatus, postSlackAlert, updateAlertPreferences } from "../api/client";
 import { REFRESH_INTERVAL_MS } from "../constants";
 import { usePollingData } from "../hooks/usePollingData";
 import { theme } from "../theme";
 import { SectionCard } from "../components/SectionCard";
-import { Mt4Quote } from "../types";
+import { AlertAsset, Mt4Quote } from "../types";
 
 function getHealthColor(status: "fresh" | "stale" | "offline") {
   if (status === "fresh") {
@@ -29,6 +29,94 @@ export function SettingsScreen() {
   const syncNotice = notifier.notice ?? mt4Snapshot.notice;
   const syncHealthy = !syncNotice;
   const syncStatusLabel = syncHealthy ? "Live data synced" : "Live data delayed, using cached data";
+
+  const [alertsEnabled, setAlertsEnabled] = useState(true);
+  const [enabledAssets, setEnabledAssets] = useState<AlertAsset[]>(["forex", "commodities", "oil", "shares"]);
+  const [minConfidence, setMinConfidence] = useState("60");
+  const [watchKeywords, setWatchKeywords] = useState("");
+  const [mutedKeywords, setMutedKeywords] = useState("");
+  const [quietStart, setQuietStart] = useState("");
+  const [quietEnd, setQuietEnd] = useState("");
+  const [alertsLoading, setAlertsLoading] = useState(true);
+  const [alertsSaving, setAlertsSaving] = useState(false);
+  const [alertsStatus, setAlertsStatus] = useState<string | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    void (async () => {
+      try {
+        const prefs = await fetchAlertPreferences();
+        if (!active) {
+          return;
+        }
+        setAlertsEnabled(prefs.enabled);
+        setEnabledAssets(prefs.enabledAssets);
+        setMinConfidence(String(prefs.minConfidence));
+        setWatchKeywords(prefs.watchKeywords.join(", "));
+        setMutedKeywords(prefs.mutedKeywords.join(", "));
+        setQuietStart(prefs.quietHours ? String(prefs.quietHours.startHour) : "");
+        setQuietEnd(prefs.quietHours ? String(prefs.quietHours.endHour) : "");
+      } catch (error) {
+        if (active) {
+          setAlertsStatus(error instanceof Error ? error.message : "Failed to load alert preferences");
+        }
+      } finally {
+        if (active) {
+          setAlertsLoading(false);
+        }
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  function toggleAsset(asset: AlertAsset) {
+    setEnabledAssets((current) =>
+      current.includes(asset) ? current.filter((item) => item !== asset) : [...current, asset]
+    );
+  }
+
+  function parseKeywords(value: string) {
+    return value
+      .split(",")
+      .map((item) => item.trim())
+      .filter((item) => item.length > 0);
+  }
+
+  async function saveAlertPreferences() {
+    setAlertsSaving(true);
+    setAlertsStatus(null);
+    try {
+      const start = Number(quietStart);
+      const end = Number(quietEnd);
+      const quietHours =
+        quietStart.trim() !== "" && quietEnd.trim() !== "" && Number.isFinite(start) && Number.isFinite(end)
+          ? { startHour: Math.max(0, Math.min(23, Math.round(start))), endHour: Math.max(0, Math.min(23, Math.round(end))) }
+          : null;
+      const confidence = Number(minConfidence);
+      const saved = await updateAlertPreferences({
+        enabled: alertsEnabled,
+        enabledAssets,
+        minConfidence: Number.isFinite(confidence) ? Math.max(0, Math.min(100, Math.round(confidence))) : 60,
+        watchKeywords: parseKeywords(watchKeywords),
+        mutedKeywords: parseKeywords(mutedKeywords),
+        quietHours
+      });
+      setAlertsEnabled(saved.enabled);
+      setEnabledAssets(saved.enabledAssets);
+      setMinConfidence(String(saved.minConfidence));
+      setWatchKeywords(saved.watchKeywords.join(", "));
+      setMutedKeywords(saved.mutedKeywords.join(", "));
+      setQuietStart(saved.quietHours ? String(saved.quietHours.startHour) : "");
+      setQuietEnd(saved.quietHours ? String(saved.quietHours.endHour) : "");
+      setAlertsStatus("Alert preferences saved.");
+    } catch (error) {
+      setAlertsStatus(error instanceof Error ? error.message : "Failed to save alert preferences");
+    } finally {
+      setAlertsSaving(false);
+    }
+  }
 
   const liveQuotes = mt4Quotes.data?.quotes ?? [];
   const liveQuotesFresh = mt4Quotes.data?.healthStatus === "fresh" && liveQuotes.length > 0;
@@ -110,6 +198,91 @@ export function SettingsScreen() {
           {sending ? <ActivityIndicator color="#06222e" /> : <Text style={styles.buttonText}>Send to Slack</Text>}
         </Pressable>
         {status ? <Text style={styles.status}>{status}</Text> : null}
+      </SectionCard>
+
+      <SectionCard title="Alert Preferences" subtitle="Control which market news alerts get pushed to Slack">
+        {alertsLoading ? <Text style={styles.neutral}>Loading alert preferences...</Text> : null}
+
+        <View style={styles.rowBetween}>
+          <Text style={styles.label}>Alerts enabled</Text>
+          <Pressable
+            style={[styles.toggle, alertsEnabled ? styles.toggleOn : styles.toggleOff]}
+            onPress={() => setAlertsEnabled((value) => !value)}
+          >
+            <Text style={styles.toggleText}>{alertsEnabled ? "ON" : "OFF"}</Text>
+          </Pressable>
+        </View>
+
+        <Text style={[styles.label, styles.spacedLabel]}>Asset classes</Text>
+        <View style={styles.chipRow}>
+          {(["forex", "commodities", "oil", "shares"] as AlertAsset[]).map((asset) => {
+            const active = enabledAssets.includes(asset);
+            return (
+              <Pressable
+                key={asset}
+                style={[styles.chip, active ? styles.chipActive : styles.chipInactive]}
+                onPress={() => toggleAsset(asset)}
+              >
+                <Text style={[styles.chipText, active ? styles.chipTextActive : styles.chipTextInactive]}>
+                  {asset.toUpperCase()}
+                </Text>
+              </Pressable>
+            );
+          })}
+        </View>
+
+        <Text style={[styles.label, styles.spacedLabel]}>Minimum confidence (%)</Text>
+        <TextInput
+          value={minConfidence}
+          onChangeText={setMinConfidence}
+          keyboardType="numeric"
+          style={styles.inlineInput}
+          placeholder="60"
+          placeholderTextColor="#7ea3b5"
+        />
+
+        <Text style={[styles.label, styles.spacedLabel]}>Watch keywords (comma separated, empty = all)</Text>
+        <TextInput
+          value={watchKeywords}
+          onChangeText={setWatchKeywords}
+          style={styles.inlineInput}
+          placeholder="fed, cpi, oil"
+          placeholderTextColor="#7ea3b5"
+        />
+
+        <Text style={[styles.label, styles.spacedLabel]}>Muted keywords (comma separated)</Text>
+        <TextInput
+          value={mutedKeywords}
+          onChangeText={setMutedKeywords}
+          style={styles.inlineInput}
+          placeholder="crypto, celebrity"
+          placeholderTextColor="#7ea3b5"
+        />
+
+        <Text style={[styles.label, styles.spacedLabel]}>Quiet hours (server local, 0-23; leave empty to disable)</Text>
+        <View style={styles.chipRow}>
+          <TextInput
+            value={quietStart}
+            onChangeText={setQuietStart}
+            keyboardType="numeric"
+            style={[styles.inlineInput, styles.halfInput]}
+            placeholder="Start e.g. 22"
+            placeholderTextColor="#7ea3b5"
+          />
+          <TextInput
+            value={quietEnd}
+            onChangeText={setQuietEnd}
+            keyboardType="numeric"
+            style={[styles.inlineInput, styles.halfInput]}
+            placeholder="End e.g. 6"
+            placeholderTextColor="#7ea3b5"
+          />
+        </View>
+
+        <Pressable style={styles.button} onPress={() => void saveAlertPreferences()} disabled={alertsSaving}>
+          {alertsSaving ? <ActivityIndicator color="#06222e" /> : <Text style={styles.buttonText}>Save Preferences</Text>}
+        </Pressable>
+        {alertsStatus ? <Text style={styles.status}>{alertsStatus}</Text> : null}
       </SectionCard>
 
       <SectionCard title="Notifier Health" subtitle="Auto news-to-Slack runtime status">
@@ -306,5 +479,78 @@ const styles = StyleSheet.create({
     color: theme.colors.text,
     fontWeight: "700",
     fontSize: 12
+  },
+  rowBetween: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between"
+  },
+  spacedLabel: {
+    marginTop: 14
+  },
+  toggle: {
+    borderRadius: 999,
+    paddingHorizontal: 16,
+    paddingVertical: 6,
+    minWidth: 58,
+    alignItems: "center"
+  },
+  toggleOn: {
+    backgroundColor: "#14392c",
+    borderWidth: 1,
+    borderColor: "#2d7f5a"
+  },
+  toggleOff: {
+    backgroundColor: "#3a1616",
+    borderWidth: 1,
+    borderColor: "#7f2d2d"
+  },
+  toggleText: {
+    color: theme.colors.text,
+    fontWeight: "800",
+    fontSize: 12
+  },
+  chipRow: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 8,
+    marginTop: 4
+  },
+  chip: {
+    borderRadius: 999,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderWidth: 1
+  },
+  chipActive: {
+    backgroundColor: "#14392c",
+    borderColor: "#2d7f5a"
+  },
+  chipInactive: {
+    backgroundColor: theme.colors.panelAlt,
+    borderColor: "#275269"
+  },
+  chipText: {
+    fontWeight: "700",
+    fontSize: 12
+  },
+  chipTextActive: {
+    color: "#6fe3ad"
+  },
+  chipTextInactive: {
+    color: theme.colors.muted
+  },
+  inlineInput: {
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: "#275269",
+    color: theme.colors.text,
+    backgroundColor: theme.colors.panelAlt,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    marginTop: 4
+  },
+  halfInput: {
+    flex: 1
   }
 });

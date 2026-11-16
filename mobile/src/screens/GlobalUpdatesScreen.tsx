@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Linking, Modal, Pressable, StyleSheet, Text, View } from "react-native";
+import { Linking, Modal, Platform, Pressable, StyleSheet, Text, View } from "react-native";
 import { fetchForexCandles, fetchGlobalNews, fetchMarketAgents, fetchMarketTrends } from "../api/client";
 import { REFRESH_INTERVAL_MS } from "../constants";
 import { usePollingData } from "../hooks/usePollingData";
 import { theme } from "../theme";
 import { SectionCard } from "../components/SectionCard";
+import { CandlestickChart } from "../components/CandlestickChart";
 import { ForexTimeframe, MarketTrend, NewsImpact, OhlcCandle } from "../types";
 
 type TrendBias = "up" | "down" | "neutral";
@@ -184,14 +185,58 @@ function unique(values: string[]) {
   return Array.from(new Set(values));
 }
 
+// Each currency's value expressed in USD, derived from the USD major (inverted when USD is the base).
+const USD_MAJOR_BY_CURRENCY: Record<string, { pair: string; invert: boolean }> = {
+  EUR: { pair: "EUR/USD", invert: false },
+  GBP: { pair: "GBP/USD", invert: false },
+  AUD: { pair: "AUD/USD", invert: false },
+  NZD: { pair: "NZD/USD", invert: false },
+  JPY: { pair: "USD/JPY", invert: true },
+  CHF: { pair: "USD/CHF", invert: true },
+  CAD: { pair: "USD/CAD", invert: true },
+  SEK: { pair: "USD/SEK", invert: true },
+  NOK: { pair: "USD/NOK", invert: true }
+};
+
+function currencyUsdValue(currency: string, trendBySymbol: Map<string, number>): number | null {
+  if (currency === "USD") {
+    return 1;
+  }
+
+  const major = USD_MAJOR_BY_CURRENCY[currency];
+  if (!major) {
+    return null;
+  }
+
+  const rate = trendBySymbol.get(major.pair) ?? PAIR_BASE_PRICE[major.pair];
+  if (typeof rate !== "number" || rate <= 0) {
+    return null;
+  }
+
+  return major.invert ? 1 / rate : rate;
+}
+
 function resolvePrice(symbol: string, trendBySymbol: Map<string, number>) {
-  return (
+  const direct =
     trendBySymbol.get(symbol) ??
     PAIR_BASE_PRICE[symbol] ??
     COMMODITY_BASE_PRICE[symbol] ??
-    OIL_BASE_PRICE[symbol] ??
-    0
-  );
+    OIL_BASE_PRICE[symbol];
+  if (typeof direct === "number" && direct > 0) {
+    return direct;
+  }
+
+  // Derive cross-pair rates (e.g. EUR/AUD) from the USD majors so they don't collapse to 0.
+  if (symbol.includes("/")) {
+    const [base, quote] = symbol.split("/");
+    const baseUsd = currencyUsdValue(base, trendBySymbol);
+    const quoteUsd = currencyUsdValue(quote, trendBySymbol);
+    if (baseUsd && quoteUsd && quoteUsd > 0) {
+      return baseUsd / quoteUsd;
+    }
+  }
+
+  return 0;
 }
 
 function orderLevels(
@@ -770,7 +815,14 @@ function ForexTechnicalPanel({ forexImpact }: { forexImpact: NewsImpact }) {
                     ))}
                   </View>
                   <View style={[styles.candleChart, { width: chartWidth, height: chartHeight }]}>
-                    {candles.map((candle, index) => {
+                    {Platform.OS === "web" ? (
+                      <CandlestickChart
+                        candles={candles}
+                        width={chartWidth}
+                        height={chartHeight}
+                        priceDecimals={pair.includes("JPY") ? 3 : 5}
+                      />
+                    ) : candles.map((candle, index) => {
                       const x = index * candleSlot;
                       const centerX = x + candleSlot / 2;
                       const openY = mapY(candle.open);

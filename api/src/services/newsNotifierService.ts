@@ -1,5 +1,6 @@
 import { config } from "../config.js";
 import { getGlobalMarketNews, NewsItem } from "./newsService.js";
+import { getAlertPreferences, shouldNotifyForNews } from "./alertPreferencesService.js";
 import { getSlackWebhookUrls, sendSlackNotification, type SlackBlock } from "./slackService.js";
 
 const seenNewsIds = new Set<string>();
@@ -151,8 +152,16 @@ async function pollAndNotify() {
   }
   notifierStatus.seenNewsCount = seenNewsIds.size;
 
+  // Apply user-configurable alert preferences before broadcasting.
+  const preferences = await getAlertPreferences();
+  const allowed = fresh.filter((item) => shouldNotifyForNews(item, preferences));
+  if (allowed.length === 0) {
+    notifierStatus.lastSentCount = 0;
+    return 0;
+  }
+
   // Send older items first if multiple arrive at once.
-  const ordered = [...fresh].reverse();
+  const ordered = [...allowed].reverse();
   let sentCount = 0;
   for (const item of ordered) {
     const message = `New market update (${feed.source.toUpperCase()} source): ${item.title}`;

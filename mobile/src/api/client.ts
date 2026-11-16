@@ -13,10 +13,9 @@ import {
   Mt4Snapshot,
   Mt4QuoteFeedResponse,
   Mt4SnapshotResponse,
-  StockSuggestion
+  StockSuggestion,
+  AlertPreferences
 } from "../types";
-
-const RATE_LIMIT_COOLDOWN_MS = 45_000;
 const TIMEOUT_COOLDOWN_MS = 10_000;
 const SHARED_CACHE_MAX_AGE_MS = 15 * 60_000;
 const STALE_SHARED_CACHE_MAX_AGE_MS = 24 * 60 * 60_000;
@@ -813,5 +812,36 @@ export async function postSlackAlert(message: string) {
       error?: string;
     };
     throw new Error(payload.error ?? "Slack request failed");
+  }
+}
+
+export async function fetchAlertPreferences() {
+  try {
+    return await getJson<AlertPreferences>("/api/alerts/preferences");
+  } catch (error) {
+    throw new Error(error instanceof Error ? error.message : "Failed to load alert preferences");
+  }
+}
+
+export async function updateAlertPreferences(preferences: Partial<AlertPreferences>) {
+  try {
+    const response = await requestWithFallback("/api/alerts/preferences", {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(preferences)
+    });
+
+    if (!response.ok) {
+      const payload = (await response.json().catch(() => ({ error: "Failed to save preferences" }))) as {
+        error?: string;
+      };
+      throw new Error(payload.error ?? "Failed to save preferences");
+    }
+
+    return (await response.json()) as AlertPreferences;
+  } catch (error) {
+    throw new Error(error instanceof Error ? error.message : "Failed to save alert preferences");
   }
 }

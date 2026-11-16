@@ -12,7 +12,9 @@ import {
 } from "./services/marketAgentService.js";
 import { getLatestMt4Snapshot, storeMt4Snapshot } from "./services/mt4Service.js";
 import { getGlobalMarketNews } from "./services/newsService.js";
+import { getMarketNewsSentiment } from "./services/newsSentimentService.js";
 import { getNewsNotifierStatus } from "./services/newsNotifierService.js";
+import { getAlertPreferences, updateAlertPreferences } from "./services/alertPreferencesService.js";
 import { sendSlackNotification } from "./services/slackService.js";
 import { getBestShares } from "./services/stockRecommendationService.js";
 import { isLiveDataUnavailableError } from "./liveData.js";
@@ -29,6 +31,21 @@ const slackSchema = z.object({
         })
       })
     )
+    .optional()
+});
+
+const alertPreferencesSchema = z.object({
+  enabled: z.boolean().optional(),
+  enabledAssets: z.array(z.enum(["forex", "commodities", "oil", "shares"])).optional(),
+  minConfidence: z.coerce.number().min(0).max(100).optional(),
+  watchKeywords: z.array(z.string()).optional(),
+  mutedKeywords: z.array(z.string()).optional(),
+  quietHours: z
+    .object({
+      startHour: z.coerce.number().int().min(0).max(23),
+      endHour: z.coerce.number().int().min(0).max(23)
+    })
+    .nullable()
     .optional()
 });
 
@@ -325,6 +342,15 @@ router.get("/api/news/global", async (_req, res) => {
   }
 });
 
+router.get("/api/news/sentiment", async (_req, res) => {
+  try {
+    const sentiment = await getMarketNewsSentiment();
+    res.json(sentiment);
+  } catch (error) {
+    return handleRouteError(res, error);
+  }
+});
+
 router.get("/api/market/trends", async (_req, res) => {
   try {
     const trends = await getMarketTrends();
@@ -504,6 +530,30 @@ router.post("/api/mt4/snapshot", async (req, res) => {
 
 router.get("/api/notify/status", (_req, res) => {
   res.json(getNewsNotifierStatus());
+});
+
+router.get("/api/alerts/preferences", async (_req, res) => {
+  try {
+    res.json(await getAlertPreferences());
+  } catch (error) {
+    return handleRouteError(res, error);
+  }
+});
+
+router.put("/api/alerts/preferences", async (req, res) => {
+  const parsed = alertPreferencesSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({
+      error: "Invalid payload",
+      details: parsed.error.flatten()
+    });
+  }
+
+  try {
+    res.json(await updateAlertPreferences(parsed.data));
+  } catch (error) {
+    return handleRouteError(res, error);
+  }
 });
 
 router.post("/api/notify/slack", async (req, res) => {

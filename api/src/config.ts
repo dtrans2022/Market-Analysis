@@ -16,6 +16,8 @@ const schema = z.object({
   SUPABASE_URL: z.string().url().optional(),
   SUPABASE_SERVICE_ROLE_KEY: z.string().optional(),
   SUPABASE_MT5_SNAPSHOT_TABLE: z.string().default("mt5_snapshots"),
+  SUPABASE_FOREX_LEDGER_TABLE: z.string().default("forex_trade_ledger"),
+  SUPABASE_ALERT_PREFS_TABLE: z.string().default("alert_preferences"),
   AUTO_NEWS_TO_SLACK_ENABLED: z
     .string()
     .optional()
@@ -26,6 +28,14 @@ const schema = z.object({
     .default("false")
     .transform((value) => value !== "false"),
   NEWS_POLL_INTERVAL_MS: z.coerce.number().default(60_000),
+  NEWS_SENTIMENT_LLM_ENABLED: z
+    .string()
+    .optional()
+    .default("false")
+    .transform((value) => value === "true"),
+  NEWS_SENTIMENT_LLM_BASE_URL: z.string().url().default("https://api.openai.com/v1"),
+  NEWS_SENTIMENT_LLM_API_KEY: z.string().optional(),
+  NEWS_SENTIMENT_LLM_MODEL: z.string().default("gpt-4o-mini"),
   ALLOWED_ORIGIN: z.string().default("*")
 });
 
