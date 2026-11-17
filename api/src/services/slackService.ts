@@ -16,12 +16,13 @@ function splitCsv(value?: string) {
   return value
     .split(",")
     .map((item) => item.trim())
+    .map((item) => item.replace(/^SLACK_WEBHOOK_URLS?\s*=\s*/i, "").trim())
     .filter((item) => item.length > 0);
 }
 
 export function getSlackWebhookUrls() {
   const configured = splitCsv(config.SLACK_WEBHOOK_URLS);
-  const merged = config.SLACK_WEBHOOK_URL ? [config.SLACK_WEBHOOK_URL, ...configured] : configured;
+  const merged = [...splitCsv(config.SLACK_WEBHOOK_URL), ...configured];
 
   return Array.from(new Set(merged));
 }
@@ -39,6 +40,10 @@ export async function sendSlackNotification(message: string, blocks: SlackBlock[
   const urls = getSlackWebhookUrls();
   if (urls.length === 0) {
     throw new Error("Slack webhook is not configured. Set SLACK_WEBHOOK_URL or SLACK_WEBHOOK_URLS in .env.");
+  }
+
+  if (urls.some((url) => !URL.canParse(url) || new URL(url).protocol !== "https:")) {
+    throw new Error("Invalid Slack webhook configuration. Use HTTPS webhook URLs, without extra text.");
   }
 
   const mentions = getSlackMentionsText();
